@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 
 import gym
 from gym.envs.registration import register, registry
@@ -7,6 +8,19 @@ from gym import spaces as gym_spaces
 from gymnasium import make as gymnasium_make
 from gymnasium.envs.registration import registry as gymnasium_registry
 from gymnasium import spaces as gymnasium_spaces
+
+_LOCAL_RWARE_ROOT = Path(__file__).resolve().parent.parent / "robotic-warehouse"
+if _LOCAL_RWARE_ROOT.exists():
+    local_root_str = str(_LOCAL_RWARE_ROOT)
+    if local_root_str not in sys.path:
+        sys.path.insert(0, local_root_str)
+
+    loaded_rware = sys.modules.get("rware")
+    loaded_rware_file = getattr(loaded_rware, "__file__", None)
+    if loaded_rware_file and not Path(loaded_rware_file).resolve().is_relative_to(_LOCAL_RWARE_ROOT.resolve()):
+        for module_name in list(sys.modules):
+            if module_name == "rware" or module_name.startswith("rware."):
+                sys.modules.pop(module_name, None)
 
 import rware  # noqa: F401
 from rware.warehouse import ImageLayer, ObservationType, RewardType

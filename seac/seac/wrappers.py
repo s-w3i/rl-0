@@ -13,6 +13,7 @@ class RecordEpisodeStatistics(gym.Wrapper):
 
     def __init__(self, env, deque_size=100):
         super().__init__(env)
+        self.n_agents = getattr(self.unwrapped, "n_agents")
         self.t0 = perf_counter()
         self.episode_reward = np.zeros(self.n_agents)
         self.episode_length = 0
@@ -21,7 +22,7 @@ class RecordEpisodeStatistics(gym.Wrapper):
 
     def reset(self, **kwargs):
         observation, info = super().reset(**kwargs)
-        self.episode_reward = 0
+        self.episode_reward = np.zeros(self.n_agents)
         self.episode_length = 0
         self.t0 = perf_counter()
 
@@ -87,6 +88,10 @@ class SquashDones(gym.Wrapper):
 
 
 class GlobalizeReward(gym.RewardWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.n_agents = getattr(self.unwrapped, "n_agents")
+
     def reward(self, reward):
         return self.n_agents * [sum(reward)]
 
