@@ -1,0 +1,10 @@
+.venv/
+.venv_rl0/
+__pycache__/
+*.pyc
+
+seac/results/
+seac/seql/logs/
+seac/seql/models/
+robotic-warehouse/.pytest_cache/
+robotic-warehouse/rware.egg-info/
