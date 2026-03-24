@@ -19,7 +19,7 @@ from sacred.observers import (  # noqa
 from torch.utils.tensorboard import SummaryWriter
 
 import utils
-from a2c import A2C, algorithm
+from a2c import A2C, RGSEAC, algorithm
 from envs import make_vec_envs
 from wrappers import RecordEpisodeStatistics, SquashDones
 from model import Policy
@@ -174,6 +174,8 @@ def main(
     save_interval,
     eval_interval,
 ):
+    if algorithm["relevance_gated_seac"] and not algorithm["recurrent_policy"]:
+        _log.info("RGSEAC is being run without recurrence; gate features will use the MLP path.")
 
     if loss_dir:
         loss_dir = path.expanduser(loss_dir.format(id=str(_run._id)))
@@ -200,8 +202,9 @@ def main(
         env_config=env_config,
     )
 
+    agent_cls = RGSEAC if algorithm["relevance_gated_seac"] else A2C
     agents = [
-        A2C(i, osp, asp)
+        agent_cls(i, osp, asp)
         for i, (osp, asp) in enumerate(zip(envs.observation_space, envs.action_space))
     ]
     obs = envs.reset()
@@ -266,7 +269,7 @@ def main(
             agent.compute_returns()
 
         for agent in agents:
-            loss = agent.update([a.storage for a in agents])
+            loss = agent.update(agents)
             for k, v in loss.items():
                 if writer:
                     writer.add_scalar(f"agent{agent.agent_id}/{k}", v, j)

@@ -46,8 +46,49 @@ class FCNetwork(nn.Module):
             target_param.data.copy_((1 - t) * target_param.data + t * source_param.data)
 
 
+class RelevanceGate(nn.Module):
+    def __init__(self, feature_dim, hidden_dim=64, min_weight=0.25):
+        super().__init__()
+
+        init_ = lambda m: init(
+            m, nn.init.orthogonal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2)
+        )
+        init_out = lambda m: init(
+            m, nn.init.orthogonal_, lambda x: nn.init.constant_(x, 0), gain=0.01
+        )
+
+        self.min_weight = float(min_weight)
+        self.net = nn.Sequential(
+            init_(nn.Linear(feature_dim * 4, hidden_dim)),
+            nn.ReLU(),
+            init_out(nn.Linear(hidden_dim, 1)),
+        )
+
+    def forward(self, target_features, source_features):
+        gate_input = torch.cat(
+            [
+                target_features,
+                source_features,
+                (target_features - source_features).abs(),
+                target_features * source_features,
+            ],
+            dim=-1,
+        )
+        gate = torch.sigmoid(self.net(gate_input))
+        return self.min_weight + (1.0 - self.min_weight) * gate
+
+
 class Policy(nn.Module):
-    def __init__(self, obs_space, action_space, base=None, base_kwargs=None):
+    def __init__(
+        self,
+        obs_space,
+        action_space,
+        base=None,
+        base_kwargs=None,
+        enable_relevance_gate=False,
+        relevance_gate_hidden_dim=64,
+        relevance_gate_min_weight=0.25,
+    ):
         super(Policy, self).__init__()
 
         obs_shape = obs_space.shape
@@ -56,6 +97,13 @@ class Policy(nn.Module):
             base_kwargs = {}
 
         self.base = MLPBase(obs_shape[0], **base_kwargs)
+        self.relevance_gate = None
+        if enable_relevance_gate:
+            self.relevance_gate = RelevanceGate(
+                self.base.output_size,
+                hidden_dim=relevance_gate_hidden_dim,
+                min_weight=relevance_gate_min_weight,
+            )
 
         if isinstance(action_space, gym.spaces.Discrete):
             self.dist = Categorical(self.base.output_size, action_space.n)
@@ -94,13 +142,26 @@ class Policy(nn.Module):
         value, _, _ = self.base(inputs, rnn_hxs, masks)
         return value
 
-    def evaluate_actions(self, inputs, rnn_hxs, masks, action):
-        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
+    def get_relevance_features(self, inputs, rnn_hxs, masks):
+        _, _, _, gate_features = self.base(
+            inputs, rnn_hxs, masks, return_gate_features=True
+        )
+        return gate_features
+
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, return_features=False):
+        if return_features:
+            value, actor_features, rnn_hxs, gate_features = self.base(
+                inputs, rnn_hxs, masks, return_gate_features=True
+            )
+        else:
+            value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
         dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
+        if return_features:
+            return value, action_log_probs, dist_entropy, rnn_hxs, gate_features
         return value, action_log_probs, dist_entropy, rnn_hxs
 
 
@@ -216,7 +277,7 @@ class MLPBase(NNBase):
 
         self.train()
 
-    def forward(self, inputs, rnn_hxs, masks):
+    def forward(self, inputs, rnn_hxs, masks, return_gate_features=False):
         x = inputs
 
         if self.is_recurrent:
@@ -224,5 +285,8 @@ class MLPBase(NNBase):
 
         hidden_critic = self.critic(x)
         hidden_actor = self.actor(x)
+        gate_features = x if self.is_recurrent else hidden_actor
 
+        if return_gate_features:
+            return self.critic_linear(hidden_critic), hidden_actor, rnn_hxs, gate_features
         return self.critic_linear(hidden_critic), hidden_actor, rnn_hxs
