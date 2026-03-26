@@ -13,16 +13,16 @@ class RecordEpisodeStatistics(gym.Wrapper):
 
     def __init__(self, env, deque_size=100):
         super().__init__(env)
-        self.n_agents = getattr(self.unwrapped, "n_agents")
+        n_agents = self.get_wrapper_attr("n_agents")
         self.t0 = perf_counter()
-        self.episode_reward = np.zeros(self.n_agents)
+        self.episode_reward = np.zeros(n_agents)
         self.episode_length = 0
         self.reward_queue = deque(maxlen=deque_size)
         self.length_queue = deque(maxlen=deque_size)
 
     def reset(self, **kwargs):
         observation, info = super().reset(**kwargs)
-        self.episode_reward = np.zeros(self.n_agents)
+        self.episode_reward = np.zeros_like(self.episode_reward)
         self.episode_length = 0
         self.t0 = perf_counter()
 

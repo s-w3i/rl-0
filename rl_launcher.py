@@ -521,6 +521,18 @@ class Launcher(QtWidgets.QMainWindow):
         self.ev_episodes.setToolTip("Number of evaluation episodes.")
         layout.addRow("Episodes", self.ev_episodes)
 
+        self.ev_record_video = QtWidgets.QCheckBox("Record video for each episode")
+        self.ev_record_video.setToolTip("Save an MP4 recording for each evaluation episode.")
+        layout.addRow("Video", self.ev_record_video)
+
+        self.ev_export_csv = QtWidgets.QCheckBox("Export CSV report")
+        self.ev_export_csv.setToolTip("Write a CSV summary for each evaluation episode.")
+        layout.addRow("CSV Report", self.ev_export_csv)
+
+        self.ev_output_dir = QtWidgets.QLineEdit("./results/evaluation")
+        self.ev_output_dir.setToolTip("Directory where evaluation videos and CSV reports are saved.")
+        layout.addRow("Output Dir", self.ev_output_dir)
+
         run_button = QtWidgets.QPushButton("Run Evaluation")
         run_button.clicked.connect(self._run_evaluation)
         layout.addRow(run_button)
@@ -2004,9 +2016,15 @@ class Launcher(QtWidgets.QMainWindow):
             str(self.ev_time_limit.value()),
             "--episodes",
             str(self.ev_episodes.value()),
+            "--output-dir",
+            self.ev_output_dir.text().strip(),
         ]
         if env_config:
             args.extend(["--env-config", env_config])
+        if self.ev_record_video.isChecked():
+            args.append("--record-video")
+        if self.ev_export_csv.isChecked():
+            args.append("--export-csv")
         self._start_process(SEAC_DIR, args)
 
 
