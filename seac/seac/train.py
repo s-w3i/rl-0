@@ -146,6 +146,7 @@ def evaluate(
             dtype=torch.float32,
             device=device,
         )
+        masks = n_masks
         all_infos.extend([i for i in infos if i and "episode_reward" in i])
 
     eval_envs.close()
@@ -175,7 +176,7 @@ def main(
     eval_interval,
 ):
     if algorithm["relevance_gated_seac"] and not algorithm["recurrent_policy"]:
-        _log.info("RGSEAC is being run without recurrence; gate features will use the MLP path.")
+        raise ValueError("RGSEAC requires algorithm.recurrent_policy=True.")
 
     if loss_dir:
         loss_dir = path.expanduser(loss_dir.format(id=str(_run._id)))
@@ -240,13 +241,19 @@ def main(
             # envs.envs[0].render()
 
             # If done then clean the history of observations.
-            masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+            masks = torch.tensor(
+                [[0.0] if done_ else [1.0] for done_ in done],
+                dtype=torch.float32,
+                device=algorithm["device"],
+            )
 
-            bad_masks = torch.FloatTensor(
+            bad_masks = torch.tensor(
                 [
                     [0.0] if info.get("TimeLimit.truncated", False) else [1.0]
                     for info in infos
-                ]
+                ],
+                dtype=torch.float32,
+                device=algorithm["device"],
             )
             for i in range(len(agents)):
                 agents[i].storage.insert(

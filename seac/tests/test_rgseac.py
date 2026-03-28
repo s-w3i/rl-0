@@ -161,6 +161,7 @@ def test_rgseac_constant_one_matches_recurrent_seac():
         seac_coef=1.0,
         max_grad_norm=0.5,
         device="cpu",
+        normalize_shared_loss=False,
     )
     rg_loss = rg_agents[0].update(
         rg_agents,
@@ -173,6 +174,7 @@ def test_rgseac_constant_one_matches_recurrent_seac():
         relevance_gate_target_mean=0.60,
         relevance_gate_reg_coef=0.0,
         relevance_gate_min_weight=0.25,
+        normalize_shared_loss=False,
     )
 
     for key in (
@@ -224,6 +226,7 @@ def test_rgseac_learned_gate_preserves_time_env_shape():
         relevance_gate_target_mean=0.60,
         relevance_gate_reg_coef=1e-3,
         relevance_gate_min_weight=0.25,
+        normalize_shared_loss=False,
     )
 
     assert capture_gate.target_shape == (3, 2, agents[0].model.base.output_size)
@@ -251,8 +254,59 @@ def test_rgseac_checkpoint_round_trip(tmp_path):
     )
     restored.restore(save_dir)
 
+    checkpoint = torch.load(save_dir / "models.pt", map_location="cpu")
+    assert set(checkpoint.keys()) == {"model_state_dict", "optimizer_state_dict"}
+
     for key, value in agent.model.state_dict().items():
         assert torch.equal(value, restored.model.state_dict()[key])
+
+
+def test_restore_supports_legacy_object_checkpoint(tmp_path):
+    agent = _make_agent(
+        RGSEAC,
+        0,
+        gym.spaces.Discrete(3),
+        relevance_gated=True,
+        gate_mode="learned",
+    )
+    save_dir = tmp_path / "agent0"
+    save_dir.mkdir()
+    torch.save(
+        {"model": agent.model, "optimizer": agent.optimizer},
+        save_dir / "models.pt",
+    )
+
+    restored = _make_agent(
+        RGSEAC,
+        0,
+        gym.spaces.Discrete(3),
+        relevance_gated=True,
+        gate_mode="learned",
+    )
+    restored.restore(save_dir)
+
+    for key, value in agent.model.state_dict().items():
+        assert torch.equal(value, restored.model.state_dict()[key])
+
+
+def test_rgseac_requires_recurrent_policy():
+    obs_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=float)
+    with pytest.raises(ValueError, match="recurrent_policy=True"):
+        RGSEAC(
+            0,
+            obs_space,
+            gym.spaces.Discrete(3),
+            3e-4,
+            1e-5,
+            False,
+            3,
+            2,
+            "cpu",
+            True,
+            "learned",
+            32,
+            0.25,
+        )
 
 
 def test_rgseac_single_agent_excludes_self_transfer():
@@ -275,7 +329,37 @@ def test_rgseac_single_agent_excludes_self_transfer():
         relevance_gate_target_mean=0.60,
         relevance_gate_reg_coef=0.0,
         relevance_gate_min_weight=0.25,
+        normalize_shared_loss=False,
     )
 
     assert loss["seac_policy_loss"] == pytest.approx(0.0)
     assert loss["seac_value_loss"] == pytest.approx(0.0)
+
+
+def test_rgseac_learned_update_does_not_accumulate_gradients_on_other_agents():
+    action_space = gym.spaces.Discrete(3)
+    agents = [
+        _make_agent(RGSEAC, idx, action_space, relevance_gated=True, gate_mode="learned")
+        for idx in range(2)
+    ]
+    for idx, agent in enumerate(agents):
+        _populate_storage(agent, seed=4321 + idx)
+        for param in agent.model.parameters():
+            param.grad = None
+
+    agents[0].update(
+        agents,
+        value_loss_coef=0.5,
+        entropy_coef=0.01,
+        seac_coef=1.0,
+        max_grad_norm=0.5,
+        device="cpu",
+        relevance_gate_mode="learned",
+        relevance_gate_target_mean=0.60,
+        relevance_gate_reg_coef=1e-3,
+        relevance_gate_min_weight=0.25,
+        normalize_shared_loss=False,
+    )
+
+    assert any(param.grad is not None for param in agents[0].model.parameters())
+    assert all(param.grad is None for param in agents[1].model.parameters())

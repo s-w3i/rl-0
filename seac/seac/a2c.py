@@ -46,6 +46,7 @@ def config():
     relevance_gate_min_weight = 0.25
     relevance_gate_target_mean = 0.60
     relevance_gate_reg_coef = 1e-3
+    normalize_shared_loss = False
 
 
 class A2C:
@@ -73,6 +74,8 @@ class A2C:
         self.action_space = action_space
         self.relevance_gated_seac = relevance_gated_seac
         self.relevance_gate_mode = relevance_gate_mode
+        if relevance_gated_seac and not recurrent_policy:
+            raise ValueError("RGSEAC requires recurrent_policy=True.")
 
         self.model = Policy(
             obs_space,
@@ -137,12 +140,25 @@ class A2C:
         )
 
     def save(self, path):
-        torch.save(self.saveables, os.path.join(path, "models.pt"))
+        checkpoint = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, os.path.join(path, "models.pt"))
 
     def restore(self, path):
-        checkpoint = torch.load(os.path.join(path, "models.pt"))
+        checkpoint = torch.load(os.path.join(path, "models.pt"), map_location="cpu")
+        if "model_state_dict" in checkpoint:
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            return
+
         for k, v in self.saveables.items():
-            v.load_state_dict(checkpoint[k].state_dict())
+            state = checkpoint[k]
+            if hasattr(state, "state_dict"):
+                state = state.state_dict()
+            v.load_state_dict(state)
 
     @algorithm.capture
     def compute_returns(self, use_gae, gamma, gae_lambda, use_proper_time_limits):
@@ -157,8 +173,7 @@ class A2C:
             next_value, use_gae, gamma, gae_lambda, use_proper_time_limits,
         )
 
-    @algorithm.capture
-    def update(
+    def _update_impl(
         self,
         storages,
         value_loss_coef,
@@ -166,6 +181,7 @@ class A2C:
         seac_coef,
         max_grad_norm,
         device,
+        normalize_shared_loss,
     ):
         storages = self._resolve_storages(storages)
 
@@ -193,7 +209,7 @@ class A2C:
         other_agent_ids = [x for x in range(len(storages)) if x != self.agent_id]
         seac_policy_loss = torch.zeros(1, device=values.device)
         seac_value_loss = torch.zeros(1, device=values.device)
-        importance_sampling = torch.ones(1, device=values.device)
+        importance_sampling_stats = []
         for oid in other_agent_ids:
 
             other_values, logp, _, _ = self.model.evaluate_actions(
@@ -213,6 +229,7 @@ class A2C:
             importance_sampling = (
                 logp.exp() / (storages[oid].action_log_probs.exp() + 1e-7)
             ).detach()
+            importance_sampling_stats.append(importance_sampling.mean())
             # importance_sampling = 1.0
             seac_value_loss += (
                 importance_sampling * other_advantage.pow(2)
@@ -220,6 +237,15 @@ class A2C:
             seac_policy_loss += (
                 -importance_sampling * logp * other_advantage.detach()
             ).mean()
+
+        if normalize_shared_loss and other_agent_ids:
+            seac_value_loss /= len(other_agent_ids)
+            seac_policy_loss /= len(other_agent_ids)
+
+        if importance_sampling_stats:
+            mean_importance_sampling = torch.stack(importance_sampling_stats).mean()
+        else:
+            mean_importance_sampling = torch.zeros(1, device=values.device)
 
         self.optimizer.zero_grad()
         (
@@ -238,12 +264,33 @@ class A2C:
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss_coef * value_loss.item(),
             "dist_entropy": entropy_coef * dist_entropy.item(),
-            "importance_sampling": importance_sampling.mean().item(),
+            "importance_sampling": mean_importance_sampling.item(),
             "seac_policy_loss": seac_coef * seac_policy_loss.item(),
             "seac_value_loss": seac_coef
             * value_loss_coef
             * seac_value_loss.item(),
         }
+
+    @algorithm.capture
+    def update(
+        self,
+        storages,
+        value_loss_coef,
+        entropy_coef,
+        seac_coef,
+        max_grad_norm,
+        device,
+        normalize_shared_loss,
+    ):
+        return self._update_impl(
+            storages,
+            value_loss_coef=value_loss_coef,
+            entropy_coef=entropy_coef,
+            seac_coef=seac_coef,
+            max_grad_norm=max_grad_norm,
+            device=device,
+            normalize_shared_loss=normalize_shared_loss,
+        )
 
 
 class RGSEAC(A2C):
@@ -259,15 +306,14 @@ class RGSEAC(A2C):
             raise RuntimeError("Learned RGSEAC requires an instantiated relevance gate.")
         return self.model.relevance_gate(target_features.detach(), source_features.detach())
 
-    def _self_features(self, agent):
+    def _aligned_gate_features(self, storage):
         obs_shape, _, num_steps, num_processes = self._rollout_shapes()
-        storage = agent.storage
-        gate_features = agent.model.get_relevance_features(
+        gate_features = self.model.get_relevance_features(
             storage.obs[:-1].view(-1, *obs_shape),
-            storage.recurrent_hidden_states[0].view(
-                -1, agent.model.recurrent_hidden_state_size
+            self.storage.recurrent_hidden_states[0].view(
+                -1, self.model.recurrent_hidden_state_size
             ),
-            storage.masks[:-1].view(-1, 1),
+            self.storage.masks[:-1].view(-1, 1),
         )
         return gate_features.view(num_steps, num_processes, -1).detach()
 
@@ -284,11 +330,30 @@ class RGSEAC(A2C):
         relevance_gate_target_mean,
         relevance_gate_reg_coef,
         relevance_gate_min_weight,
+        normalize_shared_loss,
     ):
-        agents = self._resolve_agents(storages)
-        if agents is None:
-            raise ValueError("RGSEAC update requires peer agents, not storages alone.")
         storages = self._resolve_storages(storages)
+
+        if relevance_gate_mode == "constant_one" and relevance_gate_reg_coef == 0:
+            loss = self._update_impl(
+                storages,
+                value_loss_coef=value_loss_coef,
+                entropy_coef=entropy_coef,
+                seac_coef=seac_coef,
+                max_grad_norm=max_grad_norm,
+                device=device,
+                normalize_shared_loss=normalize_shared_loss,
+            )
+            loss.update(
+                {
+                    "gate_mean": 1.0,
+                    "gate_var": 0.0,
+                    "gate_near_min_frac": 0.0,
+                    "gate_near_one_frac": 1.0,
+                    "gate_reg_loss": 0.0,
+                }
+            )
+            return loss
 
         _, _, num_steps, num_processes = self._rollout_shapes()
         values, action_log_probs, dist_entropy, _, _ = self._evaluate_storage(
@@ -305,11 +370,12 @@ class RGSEAC(A2C):
         seac_policy_loss = torch.zeros(1, device=values.device)
         seac_value_loss = torch.zeros(1, device=values.device)
         gate_values = []
-        self_features = None
+        target_self_features = None
         if relevance_gate_mode == "learned":
-            self_features = [self._self_features(agent) for agent in agents]
+            # Compute both sides of the gate in the target agent's own feature space.
+            target_self_features = self._aligned_gate_features(self.storage)
 
-        mean_importance = torch.ones(1, device=values.device)
+        importance_sampling_stats = []
         for oid in other_agent_ids:
             other_values, logp, _, _, _ = self._evaluate_storage(
                 storages[oid], return_features=True
@@ -317,19 +383,18 @@ class RGSEAC(A2C):
             other_values = other_values.view(num_steps, num_processes, 1)
             logp = logp.view(num_steps, num_processes, 1)
             other_advantage = storages[oid].returns[:-1] - other_values
+            source_features = self._aligned_gate_features(storages[oid])
 
             importance_sampling = (
                 logp.exp() / (storages[oid].action_log_probs.exp() + 1e-7)
             ).detach()
+            importance_sampling_stats.append(importance_sampling.mean())
             if relevance_gate_mode == "learned":
-                gate = self._compute_gate(
-                    self_features[self.agent_id], self_features[oid]
-                )
+                gate = self._compute_gate(target_self_features, source_features)
             else:
                 gate = self._constant_gate(
                     importance_sampling, relevance_gate_mode, relevance_gate_target_mean
                 )
-            mean_importance = importance_sampling.mean()
             gate_values.append(gate)
             weighted_importance = importance_sampling * gate
             seac_value_loss += (
@@ -338,6 +403,15 @@ class RGSEAC(A2C):
             seac_policy_loss += (
                 -weighted_importance * logp * other_advantage.detach()
             ).mean()
+
+        if normalize_shared_loss and other_agent_ids:
+            seac_value_loss /= len(other_agent_ids)
+            seac_policy_loss /= len(other_agent_ids)
+
+        if importance_sampling_stats:
+            mean_importance = torch.stack(importance_sampling_stats).mean()
+        else:
+            mean_importance = torch.zeros(1, device=values.device)
 
         if gate_values:
             stacked_gates = torch.stack(gate_values)

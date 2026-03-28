@@ -57,6 +57,8 @@ def make_env(env_name, env_config):
 
 def main():
     args = parse_args()
+    if args.relevance_gated and not args.recurrent_policy:
+        raise ValueError("RGSEAC evaluation requires --recurrent-policy.")
     device = args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu"
 
     env = make_env(args.env, args.env_config)
@@ -102,23 +104,25 @@ def main():
         while not done:
             obs = [torch.from_numpy(o).float().to(device).unsqueeze(0) for o in obs]
             if args.log_gate_stats and args.relevance_gated:
-                features = [
-                    agent.model.get_relevance_features(
+                for agent in agents:
+                    if agent.model.relevance_gate is None:
+                        continue
+                    target_feature = agent.model.get_relevance_features(
                         obs[agent.agent_id],
                         recurrent_hidden_states[agent.agent_id],
                         masks,
                     ).detach()
-                    for agent in agents
-                ]
-                for agent in agents:
-                    if agent.model.relevance_gate is None:
-                        continue
                     for other in agents:
                         if agent.agent_id == other.agent_id:
                             continue
+                        source_feature = agent.model.get_relevance_features(
+                            obs[other.agent_id],
+                            recurrent_hidden_states[agent.agent_id],
+                            masks,
+                        ).detach()
                         episode_gates.append(
                             agent.model.relevance_gate(
-                                features[agent.agent_id], features[other.agent_id]
+                                target_feature, source_feature
                             )
                             .detach()
                             .view(-1)
