@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -521,9 +522,22 @@ class Launcher(QtWidgets.QMainWindow):
         self.ev_episodes.setToolTip("Number of evaluation episodes.")
         layout.addRow("Episodes", self.ev_episodes)
 
+        self.ev_workers = QtWidgets.QSpinBox()
+        self.ev_workers.setRange(1, 256)
+        self.ev_workers.setValue(1)
+        self.ev_workers.setToolTip("Number of parallel worker processes for evaluation.")
+        layout.addRow("Workers", self.ev_workers)
+
         self.ev_record_video = QtWidgets.QCheckBox("Record video for each episode")
         self.ev_record_video.setToolTip("Save an MP4 recording for each evaluation episode.")
         layout.addRow("Video", self.ev_record_video)
+
+        self.ev_headless_video = QtWidgets.QCheckBox("Run recording via xvfb-run")
+        self.ev_headless_video.setChecked(True)
+        self.ev_headless_video.setToolTip(
+            "Wrap video-recording evaluation in xvfb-run for headless machines."
+        )
+        layout.addRow("Headless Video", self.ev_headless_video)
 
         self.ev_export_csv = QtWidgets.QCheckBox("Export CSV report")
         self.ev_export_csv.setToolTip("Write a CSV summary for each evaluation episode.")
@@ -1883,7 +1897,7 @@ class Launcher(QtWidgets.QMainWindow):
         self._request_stop_process(log_prefix="[launcher] closing: ")
         event.ignore()
 
-    def _start_process(self, working_dir, args, extra_env=None):
+    def _start_process(self, working_dir, args, extra_env=None, program=None):
         if self.process.state() != QtCore.QProcess.NotRunning:
             QtWidgets.QMessageBox.warning(self, "Busy", "A process is already running.")
             return
@@ -1897,11 +1911,12 @@ class Launcher(QtWidgets.QMainWindow):
         self.process.setProcessEnvironment(env)
         self.process.setWorkingDirectory(str(working_dir))
 
-        cmd_str = " ".join([str(python_bin)] + args)
+        cmd_program = str(program or python_bin)
+        cmd_str = " ".join([cmd_program] + args)
         self._append_log(f"[launcher] cwd: {working_dir}")
         self._append_log(f"[launcher] cmd: {cmd_str}")
 
-        self.process.start(str(python_bin), args)
+        self.process.start(cmd_program, args)
 
     def _run_human_play(self):
         env_name = self.hp_env.text().strip()
@@ -2016,6 +2031,8 @@ class Launcher(QtWidgets.QMainWindow):
             str(self.ev_time_limit.value()),
             "--episodes",
             str(self.ev_episodes.value()),
+            "--workers",
+            str(self.ev_workers.value()),
             "--output-dir",
             self.ev_output_dir.text().strip(),
         ]
@@ -2025,7 +2042,24 @@ class Launcher(QtWidgets.QMainWindow):
             args.append("--record-video")
         if self.ev_export_csv.isChecked():
             args.append("--export-csv")
-        self._start_process(SEAC_DIR, args)
+        program = None
+        if self.ev_record_video.isChecked() and self.ev_headless_video.isChecked():
+            xvfb_run = shutil.which("xvfb-run")
+            if not xvfb_run:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Missing xvfb-run",
+                    "Headless video recording requires xvfb-run, but it is not installed on this machine.",
+                )
+                return
+            python_bin = VENV_PYTHON if VENV_PYTHON.exists() else Path(sys.executable)
+            args = [
+                "-s",
+                "-screen 0 1400x900x24",
+                str(python_bin),
+            ] + args
+            program = xvfb_run
+        self._start_process(SEAC_DIR, args, program=program)
 
 
 def main():

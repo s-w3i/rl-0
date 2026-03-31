@@ -1,6 +1,8 @@
 from argparse import ArgumentParser
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from csv import DictWriter
 from pathlib import Path
+import multiprocessing as mp
 import shutil
 import subprocess
 
@@ -23,6 +25,7 @@ def parse_args():
     parser.add_argument("--path", default="pretrained/rware-small-4ag")
     parser.add_argument("--time_limit", type=int, default=500)
     parser.add_argument("--episodes", type=int, default=5)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--render", action="store_true", help="Render each evaluation step.")
     parser.add_argument("--env-config", default=None)
@@ -49,13 +52,30 @@ def make_env(env_name, env_config, render_mode=None):
             **config_kwargs,
         )
     else:
-        env = gym.make(_gymnasium_env_name(env_name), disable_env_checker=True, render_mode=render_mode)
+        env = gym.make(
+            _gymnasium_env_name(env_name),
+            disable_env_checker=True,
+            render_mode=render_mode,
+        )
     if isinstance(env.observation_space, gym_spaces.Tuple) and any(
         isinstance(space, (gym_spaces.Dict, gym_spaces.Tuple))
         for space in env.observation_space.spaces
     ):
         env = FlattenObservation(env)
     return env
+
+
+def _load_agents(env_name, env_config, model_path, device):
+    env = make_env(env_name, env_config)
+    agents = [
+        A2C(i, osp, asp, 0.1, 0.1, False, 1, 1, device)
+        for i, (osp, asp) in enumerate(zip(env.observation_space, env.action_space))
+    ]
+    env.close()
+    for agent in agents:
+        agent.restore(model_path + f"/agent{agent.agent_id}")
+        agent.model.eval()
+    return agents
 
 
 def _capture_frame(env):
@@ -171,68 +191,131 @@ def _write_video(video_path, frames, fps):
         raise RuntimeError(stderr.decode("utf-8", errors="replace").strip())
 
 
+def _render_mode(render, record_video):
+    if record_video:
+        return "rgb_array"
+    if render:
+        return "human"
+    return None
+
+
+def _run_episode(agents, episode_num, worker_config):
+    render_mode = _render_mode(worker_config["render"], worker_config["record_video"])
+    env = make_env(worker_config["env"], worker_config["env_config"], render_mode=render_mode)
+    env = TimeLimit(env, worker_config["time_limit"])
+    env = RecordEpisodeStatistics(env)
+
+    obs, _ = env.reset()
+    done = False
+    frames = []
+    if worker_config["record_video"]:
+        first_frame = _capture_frame(env)
+        if first_frame is not None:
+            frames.append(first_frame)
+
+    while not done:
+        obs = [torch.from_numpy(o).float().to(worker_config["device"]) for o in obs]
+        _, actions, _, _ = zip(
+            *[agent.model.act(obs[agent.agent_id], None, None) for agent in agents]
+        )
+        actions = [
+            a.squeeze(0).cpu().numpy().astype("int64") if a.numel() > 1 else int(a.item())
+            for a in actions
+        ]
+        if worker_config["render"]:
+            env.render()
+        obs, _, terminated, truncated, info = env.step(actions)
+        if worker_config["record_video"]:
+            frame = _capture_frame(env)
+            if frame is not None:
+                frames.append(frame)
+        done = bool(terminated or truncated)
+
+    row = _episode_report_row(episode_num, info)
+    if worker_config["record_video"] and frames:
+        output_dir = Path(worker_config["output_dir"])
+        video_path = output_dir / f"episode_{episode_num:05d}.mp4"
+        _write_video(video_path, frames, fps=env.metadata.get("render_fps", 10))
+    env.close()
+    return row
+
+
+def _evaluate_worker(worker_id, episode_ids, worker_config):
+    del worker_id
+    torch.set_num_threads(1)
+    agents = _load_agents(
+        worker_config["env"],
+        worker_config["env_config"],
+        worker_config["path"],
+        worker_config["device"],
+    )
+    return [_run_episode(agents, episode_num, worker_config) for episode_num in episode_ids]
+
+
+def _distribute_episode_ids(episodes, workers):
+    assignments = [[] for _ in range(workers)]
+    for idx, episode_num in enumerate(range(1, episodes + 1)):
+        assignments[idx % workers].append(episode_num)
+    return [assignment for assignment in assignments if assignment]
+
+
+def _print_report_rows(rows, workers):
+    for row in rows:
+        print("--- Episode Finished ---")
+        print(f"Episode {row['episode']} rewards: {row['total_reward']}")
+        print(row)
+        print(" --- ")
+    if rows:
+        mean_reward = float(np.mean([row["total_reward"] for row in rows]))
+        print(
+            f"Completed {len(rows)} evaluation episodes using {workers} worker(s). "
+            f"Mean reward: {mean_reward}"
+        )
+
+
 def main():
     args = parse_args()
     device = args.device if args.device == "cpu" or torch.cuda.is_available() else "cpu"
-    output_dir = Path(args.output_dir).expanduser()
+    workers = max(1, min(args.workers, args.episodes))
+    output_dir = Path(args.output_dir).expanduser().resolve()
+
+    if args.render and args.record_video:
+        raise ValueError("Use either --render or --record-video, not both.")
+    if args.render and workers > 1:
+        raise ValueError("Parallel evaluation workers are incompatible with --render.")
+    if args.record_video and shutil.which("ffmpeg") is None:
+        raise RuntimeError("Recording video requires ffmpeg to be installed.")
     if args.record_video or args.export_csv:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    env = make_env(args.env, args.env_config)
-    agents = [
-        A2C(i, osp, asp, 0.1, 0.1, False, 1, 1, device)
-        for i, (osp, asp) in enumerate(zip(env.observation_space, env.action_space))
-    ]
-    env.close()
-    for agent in agents:
-        agent.restore(args.path + f"/agent{agent.agent_id}")
+    worker_config = {
+        "device": device,
+        "env": args.env,
+        "env_config": args.env_config,
+        "output_dir": str(output_dir),
+        "path": args.path,
+        "record_video": args.record_video,
+        "render": args.render,
+        "time_limit": args.time_limit,
+    }
 
+    assignments = _distribute_episode_ids(args.episodes, workers)
     report_rows = []
 
-    for ep in range(args.episodes):
-        render_mode = "rgb_array" if args.record_video else None
-        env = make_env(args.env, args.env_config, render_mode=render_mode)
-        env = TimeLimit(env, args.time_limit)
-        env = RecordEpisodeStatistics(env)
-
-        obs, _ = env.reset()
-        done = False
-        frames = []
-        if args.record_video:
-            first_frame = _capture_frame(env)
-            if first_frame is not None:
-                frames.append(first_frame)
-
-        while not done:
-            obs = [torch.from_numpy(o).float().to(device) for o in obs]
-            _, actions, _, _ = zip(
-                *[agent.model.act(obs[agent.agent_id], None, None) for agent in agents]
-            )
-            actions = [
-                a.squeeze(0).cpu().numpy().astype("int64") if a.numel() > 1 else int(a.item())
-                for a in actions
+    if workers == 1:
+        report_rows = _evaluate_worker(0, assignments[0], worker_config)
+    else:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as executor:
+            futures = [
+                executor.submit(_evaluate_worker, worker_id, episode_ids, worker_config)
+                for worker_id, episode_ids in enumerate(assignments)
             ]
-            if args.render:
-                env.render()
-            obs, _, terminated, truncated, info = env.step(actions)
-            if args.record_video:
-                frame = _capture_frame(env)
-                if frame is not None:
-                    frames.append(frame)
-            done = bool(terminated or truncated)
+            for future in as_completed(futures):
+                report_rows.extend(future.result())
 
-        row = _episode_report_row(ep + 1, info)
-        if args.export_csv:
-            report_rows.append(row)
-        if args.record_video and frames:
-            video_path = output_dir / f"episode_{ep + 1:03d}.mp4"
-            _write_video(video_path, frames, fps=env.metadata.get("render_fps", 10))
-
-        print("--- Episode Finished ---")
-        print(f"Episode rewards: {row['total_reward']}")
-        print(info)
-        print(" --- ")
-        env.close()
+    report_rows.sort(key=lambda row: row["episode"])
+    _print_report_rows(report_rows, workers)
 
     if args.export_csv:
         _write_csv_report(output_dir, report_rows)
