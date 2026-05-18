@@ -303,11 +303,25 @@ class Warehouse(gym.Env):
         self._conflict_resolved_count = 0
         self._active_conflict_episodes = 0
         self._active_conflict_pairs: Set[Tuple[int, int]] = set()
+        self._active_conflict_pair_positions: Dict[
+            Tuple[int, int], Tuple[Tuple[int, int], Tuple[int, int]]
+        ] = {}
         self._delivery_count_total = 0
         self._delivery_count_by_agent = [0 for _ in range(self.n_agents)]
         self._task_completed_total = 0
         self._task_completed_by_agent = [0 for _ in range(self.n_agents)]
         self._steps_since_task_progress = 0
+        self._episode_moved_total = 0
+        self._episode_rotation_total = 0
+        self._episode_noop_total = 0
+        self._episode_forward_total = 0
+        self._episode_toggle_load_total = 0
+        self._episode_blocked_total = 0
+        self._episode_blocked_static_total = 0
+        self._episode_blocked_agent_total = 0
+        self._episode_vertex_conflict_total = 0
+        self._episode_swap_attempt_total = 0
+        self._episode_conflict_clear_total = 0
         self._last_termination_reason = "running"
         self.reward_range = (0, 1)
 
@@ -819,6 +833,12 @@ class Warehouse(gym.Env):
                     pairs.add(pair)
         return pairs
 
+    def _pair_positions(
+        self, pair: Tuple[int, int]
+    ) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+        id_to_agent = {agent.id: agent for agent in self.agents}
+        return tuple((id_to_agent[agent_id].x, id_to_agent[agent_id].y) for agent_id in pair)
+
     def _make_img_obs(self, agent):
         # write image observations
         if agent.id == 1:
@@ -1201,11 +1221,23 @@ class Warehouse(gym.Env):
         self._conflict_resolved_count = 0
         self._active_conflict_episodes = 0
         self._active_conflict_pairs = set()
+        self._active_conflict_pair_positions = {}
         self._delivery_count_total = 0
         self._delivery_count_by_agent = [0 for _ in range(self.n_agents)]
         self._task_completed_total = 0
         self._task_completed_by_agent = [0 for _ in range(self.n_agents)]
         self._steps_since_task_progress = 0
+        self._episode_moved_total = 0
+        self._episode_rotation_total = 0
+        self._episode_noop_total = 0
+        self._episode_forward_total = 0
+        self._episode_toggle_load_total = 0
+        self._episode_blocked_total = 0
+        self._episode_blocked_static_total = 0
+        self._episode_blocked_agent_total = 0
+        self._episode_vertex_conflict_total = 0
+        self._episode_swap_attempt_total = 0
+        self._episode_conflict_clear_total = 0
         self._last_termination_reason = "running"
 
         # n_xshelf = (self.grid_size[1] - 1) // 3
@@ -1284,6 +1316,15 @@ class Warehouse(gym.Env):
             else:
                 agent.req_action = Action(int(action))
 
+        step_noop_total = sum(int(agent.req_action == Action.NOOP) for agent in self.agents)
+        step_rotation_total = sum(
+            int(agent.req_action in {Action.LEFT, Action.RIGHT}) for agent in self.agents
+        )
+        step_forward_total = sum(int(agent.req_action == Action.FORWARD) for agent in self.agents)
+        step_toggle_load_total = sum(
+            int(agent.req_action == Action.TOGGLE_LOAD) for agent in self.agents
+        )
+
         commited_agents = set()
         G = nx.DiGraph()
         pre_positions = [(agent.x, agent.y) for agent in self.agents]
@@ -1339,11 +1380,11 @@ class Warehouse(gym.Env):
 
         # Track pairwise action conflicts from current move intents.
         prev_conflict_pairs = set(self._active_conflict_pairs)
+        prev_conflict_pair_positions = dict(self._active_conflict_pair_positions)
         step_conflict_pairs = self._conflict_pairs(
             [agent.req_action for agent in self.agents]
         )
         started_pairs = step_conflict_pairs - prev_conflict_pairs
-        resolved_pairs = prev_conflict_pairs - step_conflict_pairs
 
         wcomps = [G.subgraph(c).copy() for c in nx.weakly_connected_components(G)]
 
@@ -1447,6 +1488,46 @@ class Warehouse(gym.Env):
         step_moved_total = int(step_moved_by_agent.sum())
         step_vertex_conflicts = int(step_vertex_by_agent.sum())
 
+        self._episode_moved_total += step_moved_total
+        self._episode_rotation_total += int(step_rotation_total)
+        self._episode_noop_total += int(step_noop_total)
+        self._episode_forward_total += int(step_forward_total)
+        self._episode_toggle_load_total += int(step_toggle_load_total)
+        self._episode_blocked_total += step_blocked_total
+        self._episode_blocked_static_total += step_blocked_static
+        self._episode_blocked_agent_total += step_blocked_agent
+        self._episode_vertex_conflict_total += step_vertex_conflicts
+        self._episode_swap_attempt_total += int(step_swap_attempts)
+
+        candidate_resolved_pairs = prev_conflict_pairs - step_conflict_pairs
+        resolved_pairs = set()
+        still_blocked_pairs = set()
+        current_pair_positions = {}
+        step_conflict_clear_by_agent = np.zeros(self.n_agents, dtype=np.int32)
+
+        def pair_distance(positions):
+            return abs(positions[0][0] - positions[1][0]) + abs(
+                positions[0][1] - positions[1][1]
+            )
+
+        for pair in candidate_resolved_pairs:
+            current_positions = self._pair_positions(pair)
+            current_pair_positions[pair] = current_positions
+            previous_positions = prev_conflict_pair_positions.get(pair)
+            if current_positions != previous_positions:
+                resolved_pairs.add(pair)
+                if previous_positions is not None and pair_distance(
+                    current_positions
+                ) > pair_distance(previous_positions):
+                    for agent_id in pair:
+                        step_conflict_clear_by_agent[agent_id - 1] = 1
+                elif previous_positions is not None:
+                    for offset, agent_id in enumerate(pair):
+                        if current_positions[offset] != previous_positions[offset]:
+                            step_conflict_clear_by_agent[agent_id - 1] = 1
+            else:
+                still_blocked_pairs.add(pair)
+
         dropped_agents = set(manually_dropped_agents)
         for agent in self.agents:
             if not agent.carrying_shelf:
@@ -1545,9 +1626,15 @@ class Warehouse(gym.Env):
 
         step_conflict_detected = len(started_pairs)
         step_conflict_resolved = len(resolved_pairs)
+        step_conflict_clear_count = int(step_conflict_clear_by_agent.sum())
         self._conflict_detected_count += int(step_conflict_detected)
         self._conflict_resolved_count += int(step_conflict_resolved)
-        self._active_conflict_pairs = set(step_conflict_pairs)
+        self._episode_conflict_clear_total += step_conflict_clear_count
+        self._active_conflict_pairs = set(step_conflict_pairs) | still_blocked_pairs
+        self._active_conflict_pair_positions = {
+            pair: current_pair_positions.get(pair, self._pair_positions(pair))
+            for pair in self._active_conflict_pairs
+        }
         self._active_conflict_episodes = int(len(self._active_conflict_pairs))
         unresolved_conflicts = max(
             0, int(self._conflict_detected_count - self._conflict_resolved_count)
@@ -1562,6 +1649,21 @@ class Warehouse(gym.Env):
         info["step_blocked_static"] = int(step_blocked_static)
         info["step_blocked_total"] = int(step_blocked_total)
         info["step_moved_total"] = int(step_moved_total)
+        info["step_noop_total"] = int(step_noop_total)
+        info["step_rotation_total"] = int(step_rotation_total)
+        info["step_forward_total"] = int(step_forward_total)
+        info["step_toggle_load_total"] = int(step_toggle_load_total)
+        info["episode_moved_total"] = int(self._episode_moved_total)
+        info["episode_rotation_total"] = int(self._episode_rotation_total)
+        info["episode_noop_total"] = int(self._episode_noop_total)
+        info["episode_forward_total"] = int(self._episode_forward_total)
+        info["episode_toggle_load_total"] = int(self._episode_toggle_load_total)
+        info["episode_blocked_total"] = int(self._episode_blocked_total)
+        info["episode_blocked_static_total"] = int(self._episode_blocked_static_total)
+        info["episode_blocked_agent_total"] = int(self._episode_blocked_agent_total)
+        info["episode_vertex_conflict_total"] = int(self._episode_vertex_conflict_total)
+        info["episode_swap_attempt_total"] = int(self._episode_swap_attempt_total)
+        info["episode_conflict_clear_total"] = int(self._episode_conflict_clear_total)
         info["step_swap_by_agent"] = [int(v) for v in step_swap_by_agent]
         info["step_vertex_by_agent"] = [int(v) for v in step_vertex_by_agent]
         info["step_blocked_agent_by_agent"] = [
@@ -1573,6 +1675,10 @@ class Warehouse(gym.Env):
         info["step_moved_by_agent"] = [int(v) for v in step_moved_by_agent]
         info["step_conflict_detected"] = int(step_conflict_detected)
         info["step_conflict_resolved"] = int(step_conflict_resolved)
+        info["step_conflict_clear_count"] = int(step_conflict_clear_count)
+        info["step_conflict_clear_by_agent"] = [
+            int(v) for v in step_conflict_clear_by_agent
+        ]
         info["delivery_count"] = int(self._delivery_count_total)
         info["task_completed"] = int(self._task_completed_total)
         info["steps_since_task_progress"] = int(self._steps_since_task_progress)

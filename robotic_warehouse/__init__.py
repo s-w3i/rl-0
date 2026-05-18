@@ -95,6 +95,15 @@ def load_env_config(env_config_path):
     return env_id, kwargs
 
 
+def load_env_training_overrides(env_config_path):
+    path = Path(env_config_path).expanduser().resolve()
+    data = json.loads(path.read_text())
+    overrides = data.get("training_overrides") or {}
+    if not isinstance(overrides, dict):
+        return {}
+    return dict(overrides)
+
+
 class RwareLegacyGymWrapper(gym.Env):
     metadata = {"render.modes": ["human", "rgb_array"]}
 

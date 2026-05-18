@@ -12,3 +12,4 @@ SPEC.loader.exec_module(MODULE)
 
 RwareLegacyGymWrapper = MODULE.RwareLegacyGymWrapper
 load_env_config = MODULE.load_env_config
+load_env_training_overrides = MODULE.load_env_training_overrides

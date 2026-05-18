@@ -3,12 +3,14 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-
-import numpy as np
 
 import gymnasium
-from model import Policy, FCNetwork
+from model import Policy
+from planner import (
+    build_planner_context_pair,
+    planner_context_gate_target,
+    planner_pair_feature_dim,
+)
 from storage import RolloutStorage
 from sacred import Ingredient
 
@@ -40,12 +42,25 @@ def config():
     num_steps = 5
 
     device = "cpu"
+    use_global_planner = False
+    planner_type = "astar"
+    planner_recompute_interval = 1
+    planner_prefix_len = 4
+    planner_feature_mode = "local"
+    planner_blocked_penalty = 0.0
+    planner_agent_blocked_penalty = 0.0
+    planner_swap_penalty = 0.0
+    planner_blocked_wait_bonus = 0.0
+    planner_unblocked_deviation_penalty = 0.0
+    planner_follow_bonus = 0.0
+    planner_conflict_clear_bonus = 0.0
     relevance_gated_seac = False
-    relevance_gate_mode = "learned"
+    relevance_gate_mode = "planner_context"
     relevance_gate_hidden_dim = 64
     relevance_gate_min_weight = 0.25
     relevance_gate_target_mean = 0.60
     relevance_gate_reg_coef = 1e-3
+    relevance_gate_context_reg_coef = 5e-2
     normalize_shared_loss = False
 
 
@@ -62,28 +77,48 @@ class A2C:
         num_steps,
         num_processes,
         device,
+        use_global_planner,
+        planner_prefix_len,
         relevance_gated_seac,
         relevance_gate_mode,
         relevance_gate_hidden_dim,
         relevance_gate_min_weight,
+        planner_feature_mode="local",
     ):
         self.agent_id = agent_id
         self.obs_size = flatdim(obs_space)
         self.action_size = flatdim(action_space)
         self.obs_space = obs_space
         self.action_space = action_space
+        self.use_global_planner = use_global_planner
+        self.planner_prefix_len = int(planner_prefix_len)
+        self.planner_feature_mode = planner_feature_mode
         self.relevance_gated_seac = relevance_gated_seac
-        self.relevance_gate_mode = relevance_gate_mode
+        self.relevance_gate_mode = self._canonical_gate_mode(relevance_gate_mode)
         if relevance_gated_seac and not recurrent_policy:
             raise ValueError("RGSEAC requires recurrent_policy=True.")
+        if (
+            relevance_gated_seac
+            and self.relevance_gate_mode == "planner_context"
+            and not self.use_global_planner
+        ):
+            raise ValueError("planner_context gating requires use_global_planner=True.")
+
+        gate_input_dim = None
+        if self.relevance_gate_mode == "planner_context":
+            gate_input_dim = planner_pair_feature_dim()
+        elif self.relevance_gate_mode == "latent_learned":
+            gate_input_dim = None
 
         self.model = Policy(
             obs_space,
             action_space,
             base_kwargs={"recurrent": recurrent_policy},
             enable_relevance_gate=(
-                relevance_gated_seac and relevance_gate_mode == "learned"
+                relevance_gated_seac
+                and self.relevance_gate_mode in {"planner_context", "latent_learned"}
             ),
+            relevance_gate_input_dim=gate_input_dim,
             relevance_gate_hidden_dim=relevance_gate_hidden_dim,
             relevance_gate_min_weight=relevance_gate_min_weight,
         )
@@ -104,6 +139,11 @@ class A2C:
             "model": self.model,
             "optimizer": self.optimizer,
         }
+
+    def _canonical_gate_mode(self, mode):
+        if mode == "learned":
+            return "latent_learned"
+        return mode
 
     def _resolve_storages(self, storages_or_agents):
         if not storages_or_agents:
@@ -127,11 +167,15 @@ class A2C:
         num_steps, num_processes, _ = self.storage.rewards.size()
         return obs_shape, action_shape, num_steps, num_processes
 
-    def _evaluate_storage(self, storage, return_features=False):
+    def _evaluate_storage(
+        self, storage, return_features=False, initial_recurrent_hidden_states=None
+    ):
         obs_shape, action_shape, _, _ = self._rollout_shapes()
+        if initial_recurrent_hidden_states is None:
+            initial_recurrent_hidden_states = storage.recurrent_hidden_states[0]
         return self.model.evaluate_actions(
             storage.obs[:-1].view(-1, *obs_shape),
-            storage.recurrent_hidden_states[0].view(
+            initial_recurrent_hidden_states.view(
                 -1, self.model.recurrent_hidden_state_size
             ),
             storage.masks[:-1].view(-1, 1),
@@ -187,14 +231,7 @@ class A2C:
 
         obs_shape, action_shape, num_steps, num_processes = self._rollout_shapes()
 
-        values, action_log_probs, dist_entropy, _ = self.model.evaluate_actions(
-            self.storage.obs[:-1].view(-1, *obs_shape),
-            self.storage.recurrent_hidden_states[0].view(
-                -1, self.model.recurrent_hidden_state_size
-            ),
-            self.storage.masks[:-1].view(-1, 1),
-            self.storage.actions.view(-1, action_shape),
-        )
+        values, action_log_probs, dist_entropy, _ = self._evaluate_storage(self.storage)
 
         values = values.view(num_steps, num_processes, 1)
         action_log_probs = action_log_probs.view(num_steps, num_processes, 1)
@@ -212,13 +249,9 @@ class A2C:
         importance_sampling_stats = []
         for oid in other_agent_ids:
 
-            other_values, logp, _, _ = self.model.evaluate_actions(
-                storages[oid].obs[:-1].view(-1, *obs_shape),
-                storages[oid]
-                .recurrent_hidden_states[0]
-                .view(-1, self.model.recurrent_hidden_state_size),
-                storages[oid].masks[:-1].view(-1, 1),
-                storages[oid].actions.view(-1, action_shape),
+            other_values, logp, _, _ = self._evaluate_storage(
+                storages[oid],
+                initial_recurrent_hidden_states=self.storage.recurrent_hidden_states[0],
             )
             other_values = other_values.view(num_steps, num_processes, 1)
             logp = logp.view(num_steps, num_processes, 1)
@@ -301,21 +334,34 @@ class RGSEAC(A2C):
             return torch.full_like(reference, float(target_mean))
         raise ValueError(f"Unsupported relevance gate mode: {mode}")
 
-    def _compute_gate(self, target_features, source_features):
+    def _compute_gate(self, gate_input):
         if self.model.relevance_gate is None:
             raise RuntimeError("Learned RGSEAC requires an instantiated relevance gate.")
-        return self.model.relevance_gate(target_features.detach(), source_features.detach())
+        return self.model.relevance_gate(gate_input.detach())
 
-    def _aligned_gate_features(self, storage):
+    def _aligned_gate_features(self, storage, initial_recurrent_hidden_states=None):
         obs_shape, _, num_steps, num_processes = self._rollout_shapes()
+        if initial_recurrent_hidden_states is None:
+            initial_recurrent_hidden_states = storage.recurrent_hidden_states[0]
         gate_features = self.model.get_relevance_features(
             storage.obs[:-1].view(-1, *obs_shape),
-            self.storage.recurrent_hidden_states[0].view(
+            initial_recurrent_hidden_states.view(
                 -1, self.model.recurrent_hidden_state_size
             ),
-            self.storage.masks[:-1].view(-1, 1),
+            storage.masks[:-1].view(-1, 1),
         )
         return gate_features.view(num_steps, num_processes, -1).detach()
+
+    def _latent_pair_features(self, target_features, source_features):
+        return torch.cat(
+            [
+                target_features,
+                source_features,
+                (target_features - source_features).abs(),
+                target_features * source_features,
+            ],
+            dim=-1,
+        )
 
     @algorithm.capture
     def update(
@@ -331,8 +377,10 @@ class RGSEAC(A2C):
         relevance_gate_reg_coef,
         relevance_gate_min_weight,
         normalize_shared_loss,
+        relevance_gate_context_reg_coef=0.0,
     ):
         storages = self._resolve_storages(storages)
+        relevance_gate_mode = self._canonical_gate_mode(relevance_gate_mode)
 
         if relevance_gate_mode == "constant_one" and relevance_gate_reg_coef == 0:
             loss = self._update_impl(
@@ -357,7 +405,9 @@ class RGSEAC(A2C):
 
         _, _, num_steps, num_processes = self._rollout_shapes()
         values, action_log_probs, dist_entropy, _, _ = self._evaluate_storage(
-            self.storage, return_features=True
+            self.storage,
+            return_features=True,
+            initial_recurrent_hidden_states=self.storage.recurrent_hidden_states[0],
         )
         values = values.view(num_steps, num_processes, 1)
         action_log_probs = action_log_probs.view(num_steps, num_processes, 1)
@@ -370,27 +420,54 @@ class RGSEAC(A2C):
         seac_policy_loss = torch.zeros(1, device=values.device)
         seac_value_loss = torch.zeros(1, device=values.device)
         gate_values = []
+        gate_context_losses = []
+        gate_context_targets = []
         target_self_features = None
-        if relevance_gate_mode == "learned":
-            # Compute both sides of the gate in the target agent's own feature space.
-            target_self_features = self._aligned_gate_features(self.storage)
+        if relevance_gate_mode == "latent_learned":
+            target_self_features = self._aligned_gate_features(
+                self.storage,
+                initial_recurrent_hidden_states=self.storage.recurrent_hidden_states[0],
+            )
 
         importance_sampling_stats = []
         for oid in other_agent_ids:
             other_values, logp, _, _, _ = self._evaluate_storage(
-                storages[oid], return_features=True
+                storages[oid],
+                return_features=True,
+                initial_recurrent_hidden_states=self.storage.recurrent_hidden_states[0],
             )
             other_values = other_values.view(num_steps, num_processes, 1)
             logp = logp.view(num_steps, num_processes, 1)
             other_advantage = storages[oid].returns[:-1] - other_values
-            source_features = self._aligned_gate_features(storages[oid])
+            source_features = None
+            if relevance_gate_mode == "latent_learned":
+                source_features = self._aligned_gate_features(
+                    storages[oid],
+                    initial_recurrent_hidden_states=self.storage.recurrent_hidden_states[0],
+                )
 
             importance_sampling = (
                 logp.exp() / (storages[oid].action_log_probs.exp() + 1e-7)
             ).detach()
             importance_sampling_stats.append(importance_sampling.mean())
-            if relevance_gate_mode == "learned":
-                gate = self._compute_gate(target_self_features, source_features)
+            if relevance_gate_mode == "latent_learned":
+                gate_input = self._latent_pair_features(target_self_features, source_features)
+                gate = self._compute_gate(gate_input)
+            elif relevance_gate_mode == "planner_context":
+                gate_input = build_planner_context_pair(
+                    self.storage.obs[:-1],
+                    storages[oid].obs[:-1],
+                    self.planner_prefix_len,
+                    planner_feature_mode=self.planner_feature_mode,
+                )
+                gate = self._compute_gate(gate_input)
+                if relevance_gate_context_reg_coef != 0:
+                    target = planner_context_gate_target(
+                        gate_input,
+                        min_weight=relevance_gate_min_weight,
+                    )
+                    gate_context_losses.append((gate - target).pow(2).mean())
+                    gate_context_targets.append(target.detach())
             else:
                 gate = self._constant_gate(
                     importance_sampling, relevance_gate_mode, relevance_gate_target_mean
@@ -425,12 +502,20 @@ class RGSEAC(A2C):
             gate_near_min = (stacked_gates <= gate_min + 1e-3).float().mean()
             gate_near_one = (stacked_gates >= 1.0 - 1e-3).float().mean()
             gate_reg_loss = (gate_mean - relevance_gate_target_mean).pow(2)
+            if gate_context_losses:
+                gate_context_reg_loss = torch.stack(gate_context_losses).mean()
+                gate_context_target_mean = torch.stack(gate_context_targets).mean()
+            else:
+                gate_context_reg_loss = torch.zeros(1, device=values.device)
+                gate_context_target_mean = torch.zeros(1, device=values.device)
         else:
             gate_mean = torch.zeros(1, device=values.device)
             gate_var = torch.zeros(1, device=values.device)
             gate_near_min = torch.zeros(1, device=values.device)
             gate_near_one = torch.zeros(1, device=values.device)
             gate_reg_loss = torch.zeros(1, device=values.device)
+            gate_context_reg_loss = torch.zeros(1, device=values.device)
+            gate_context_target_mean = torch.zeros(1, device=values.device)
 
         self.optimizer.zero_grad()
         (
@@ -440,6 +525,7 @@ class RGSEAC(A2C):
             + seac_coef * seac_policy_loss
             + seac_coef * value_loss_coef * seac_value_loss
             + relevance_gate_reg_coef * gate_reg_loss
+            + relevance_gate_context_reg_coef * gate_context_reg_loss
         ).backward()
 
         nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
@@ -461,4 +547,8 @@ class RGSEAC(A2C):
             "gate_reg_loss": float(
                 (relevance_gate_reg_coef * gate_reg_loss).item()
             ),
+            "gate_context_reg_loss": float(
+                (relevance_gate_context_reg_coef * gate_context_reg_loss).item()
+            ),
+            "gate_context_target_mean": float(gate_context_target_mean.item()),
         }

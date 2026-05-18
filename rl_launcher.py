@@ -236,6 +236,7 @@ class Launcher(QtWidgets.QMainWindow):
         main_layout.addWidget(self.body_splitter, stretch=1)
 
         self._update_buttons()
+        self._refresh_resume_runs()
 
     def _build_human_play_tab(self):
         tab = QtWidgets.QWidget()
@@ -336,6 +337,37 @@ class Launcher(QtWidgets.QMainWindow):
         self.tr_num_env_steps.setToolTip("Total number of environment steps to train.")
         run_form.addRow("Num Env Steps", self.tr_num_env_steps)
 
+        self.tr_resume_enabled = QtWidgets.QCheckBox()
+        self.tr_resume_enabled.setChecked(False)
+        self.tr_resume_enabled.setToolTip(
+            "Resume model and optimizer state from a previous saved checkpoint."
+        )
+        run_form.addRow("Resume Training", self.tr_resume_enabled)
+
+        resume_widget = QtWidgets.QWidget()
+        resume_layout = QtWidgets.QGridLayout(resume_widget)
+        resume_layout.setContentsMargins(0, 0, 0, 0)
+        resume_layout.addWidget(QtWidgets.QLabel("Run"), 0, 0)
+        self.tr_resume_run = QtWidgets.QComboBox()
+        self.tr_resume_run.setToolTip("Previous trained_models run id.")
+        self.tr_resume_run.currentIndexChanged.connect(self._on_resume_run_selected)
+        resume_layout.addWidget(self.tr_resume_run, 0, 1)
+        resume_layout.addWidget(QtWidgets.QLabel("Checkpoint"), 1, 0)
+        self.tr_resume_checkpoint = QtWidgets.QComboBox()
+        self.tr_resume_checkpoint.setToolTip("Checkpoint to restore before training.")
+        resume_layout.addWidget(self.tr_resume_checkpoint, 1, 1)
+        resume_refresh = QtWidgets.QPushButton("Refresh")
+        resume_refresh.clicked.connect(self._refresh_resume_runs)
+        resume_refresh.setToolTip("Refresh available saved training checkpoints.")
+        resume_layout.addWidget(resume_refresh, 0, 2)
+        resume_load_config = QtWidgets.QPushButton("Load Run Config")
+        resume_load_config.clicked.connect(self._load_selected_run_config)
+        resume_load_config.setToolTip(
+            "Fill training fields from the selected run's Sacred config."
+        )
+        resume_layout.addWidget(resume_load_config, 1, 2)
+        run_form.addRow("Resume Source", resume_widget)
+
         layout.addWidget(run_group)
 
         algo_group = QtWidgets.QGroupBox("Algorithm Settings")
@@ -419,6 +451,130 @@ class Launcher(QtWidgets.QMainWindow):
         self.tr_seac_coef.setValue(1.0)
         self.tr_seac_coef.setToolTip("SEAC coefficient for cross-agent loss.")
         algo_form.addRow("SEAC Coef", self.tr_seac_coef)
+
+        self.tr_use_global_planner = QtWidgets.QCheckBox()
+        self.tr_use_global_planner.setChecked(True)
+        self.tr_use_global_planner.setToolTip(
+            "Append planner hints to observations for planner-guided training."
+        )
+        algo_form.addRow("Use Global Planner", self.tr_use_global_planner)
+
+        self.tr_relevance_gated_seac = QtWidgets.QCheckBox()
+        self.tr_relevance_gated_seac.setChecked(True)
+        self.tr_relevance_gated_seac.setToolTip(
+            "Enable relevance-gated SEAC (RGSEAC) cross-agent transfer."
+        )
+        algo_form.addRow("Relevance-Gated SEAC", self.tr_relevance_gated_seac)
+
+        self.tr_relevance_gate_mode = QtWidgets.QComboBox()
+        self.tr_relevance_gate_mode.addItems(
+            [
+                "planner_context",
+                "latent_learned",
+                "constant_one",
+                "constant_target",
+            ]
+        )
+        self.tr_relevance_gate_mode.setCurrentText("planner_context")
+        self.tr_relevance_gate_mode.setToolTip("RGSEAC gate mode.")
+        algo_form.addRow("Gate Mode", self.tr_relevance_gate_mode)
+
+        self.tr_planner_prefix_len = QtWidgets.QSpinBox()
+        self.tr_planner_prefix_len.setRange(1, 32)
+        self.tr_planner_prefix_len.setValue(3)
+        self.tr_planner_prefix_len.setToolTip(
+            "Planner path prefix length added to observations."
+        )
+        algo_form.addRow("Planner Prefix Len", self.tr_planner_prefix_len)
+
+        self.tr_planner_feature_mode = QtWidgets.QComboBox()
+        self.tr_planner_feature_mode.addItems(["local", "basic"])
+        self.tr_planner_feature_mode.setCurrentText("local")
+        self.tr_planner_feature_mode.setToolTip(
+            "Use local to avoid absolute planner-coordinate features."
+        )
+        algo_form.addRow("Planner Feature Mode", self.tr_planner_feature_mode)
+
+        self.tr_planner_recompute_interval = QtWidgets.QSpinBox()
+        self.tr_planner_recompute_interval.setRange(1, 1000)
+        self.tr_planner_recompute_interval.setValue(2)
+        self.tr_planner_recompute_interval.setToolTip(
+            "Planner recompute interval (steps)."
+        )
+        algo_form.addRow(
+            "Planner Recompute Interval", self.tr_planner_recompute_interval
+        )
+        reward_source_label = QtWidgets.QLabel(
+            "Defined by selected env config training_overrides"
+        )
+        reward_source_label.setWordWrap(True)
+        reward_source_label.setToolTip(
+            "Edit reward shaping in the Env Config generator, then save/select that JSON."
+        )
+        algo_form.addRow("Reward Shaping", reward_source_label)
+
+        self.tr_planner_blocked_penalty = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_blocked_penalty.setDecimals(6)
+        self.tr_planner_blocked_penalty.setRange(0.0, 10.0)
+        self.tr_planner_blocked_penalty.setSingleStep(0.001)
+        self.tr_planner_blocked_penalty.setValue(0.01)
+        self.tr_planner_blocked_penalty.setToolTip(
+            "Per-step penalty when planned next cell is blocked by static layout."
+        )
+
+        self.tr_planner_agent_blocked_penalty = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_agent_blocked_penalty.setDecimals(6)
+        self.tr_planner_agent_blocked_penalty.setRange(0.0, 10.0)
+        self.tr_planner_agent_blocked_penalty.setSingleStep(0.001)
+        self.tr_planner_agent_blocked_penalty.setValue(0.02)
+        self.tr_planner_agent_blocked_penalty.setToolTip(
+            "Stronger per-step penalty when blocked by another agent."
+        )
+
+        self.tr_planner_swap_penalty = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_swap_penalty.setDecimals(6)
+        self.tr_planner_swap_penalty.setRange(0.0, 10.0)
+        self.tr_planner_swap_penalty.setSingleStep(0.001)
+        self.tr_planner_swap_penalty.setValue(0.03)
+        self.tr_planner_swap_penalty.setToolTip(
+            "Penalty for attempted agent-agent position swaps."
+        )
+
+        self.tr_planner_blocked_wait_bonus = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_blocked_wait_bonus.setDecimals(6)
+        self.tr_planner_blocked_wait_bonus.setRange(0.0, 10.0)
+        self.tr_planner_blocked_wait_bonus.setSingleStep(0.001)
+        self.tr_planner_blocked_wait_bonus.setValue(0.006)
+        self.tr_planner_blocked_wait_bonus.setToolTip(
+            "Per-step bonus for yielding/waiting when blocked."
+        )
+
+        self.tr_planner_unblocked_deviation_penalty = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_unblocked_deviation_penalty.setDecimals(6)
+        self.tr_planner_unblocked_deviation_penalty.setRange(0.0, 10.0)
+        self.tr_planner_unblocked_deviation_penalty.setSingleStep(0.001)
+        self.tr_planner_unblocked_deviation_penalty.setValue(0.004)
+        self.tr_planner_unblocked_deviation_penalty.setToolTip(
+            "Per-step penalty for unblocked off-plan deviation."
+        )
+
+        self.tr_planner_follow_bonus = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_follow_bonus.setDecimals(6)
+        self.tr_planner_follow_bonus.setRange(0.0, 10.0)
+        self.tr_planner_follow_bonus.setSingleStep(0.001)
+        self.tr_planner_follow_bonus.setValue(0.002)
+        self.tr_planner_follow_bonus.setToolTip(
+            "Per-step bonus for following the planned next move."
+        )
+
+        self.tr_planner_conflict_clear_bonus = QtWidgets.QDoubleSpinBox()
+        self.tr_planner_conflict_clear_bonus.setDecimals(6)
+        self.tr_planner_conflict_clear_bonus.setRange(0.0, 10.0)
+        self.tr_planner_conflict_clear_bonus.setSingleStep(0.001)
+        self.tr_planner_conflict_clear_bonus.setValue(0.01)
+        self.tr_planner_conflict_clear_bonus.setToolTip(
+            "Bonus when an agent helps clear an active conflict pair."
+        )
 
         self.tr_device = QtWidgets.QComboBox()
         self.tr_device.addItems(["cuda", "cpu"])
@@ -507,7 +663,21 @@ class Launcher(QtWidgets.QMainWindow):
 
         self.ev_path = QtWidgets.QLineEdit("pretrained/rware-small-4ag")
         self.ev_path.setToolTip("Path to trained model weights.")
-        layout.addRow("Models Path", self.ev_path)
+        ev_path_row = QtWidgets.QWidget()
+        ev_path_layout = QtWidgets.QHBoxLayout(ev_path_row)
+        ev_path_layout.setContentsMargins(0, 0, 0, 0)
+        ev_path_layout.addWidget(self.ev_path)
+        ev_path_browse = QtWidgets.QPushButton("Browse")
+        ev_path_browse.clicked.connect(
+            lambda: self._browse_directory(self.ev_path, "Select Models Directory")
+        )
+        ev_path_browse.setToolTip("Select the directory containing trained agent folders.")
+        ev_path_layout.addWidget(ev_path_browse)
+        ev_path_file = QtWidgets.QPushButton("File")
+        ev_path_file.clicked.connect(self._browse_model_file)
+        ev_path_file.setToolTip("Select a saved u*.tar.xz checkpoint archive.")
+        ev_path_layout.addWidget(ev_path_file)
+        layout.addRow("Models Path", ev_path_row)
 
         self.ev_time_limit = QtWidgets.QSpinBox()
         self.ev_time_limit.setRange(1, 100000)
@@ -520,6 +690,100 @@ class Launcher(QtWidgets.QMainWindow):
         self.ev_episodes.setValue(5)
         self.ev_episodes.setToolTip("Number of evaluation episodes.")
         layout.addRow("Episodes", self.ev_episodes)
+
+        self.ev_output_dir = QtWidgets.QLineEdit("seac_eval")
+        self.ev_output_dir.setToolTip("Directory to write evaluation logs/results.")
+        ev_output_dir_row = QtWidgets.QWidget()
+        ev_output_dir_layout = QtWidgets.QHBoxLayout(ev_output_dir_row)
+        ev_output_dir_layout.setContentsMargins(0, 0, 0, 0)
+        ev_output_dir_layout.addWidget(self.ev_output_dir)
+        ev_output_dir_browse = QtWidgets.QPushButton("Browse")
+        ev_output_dir_browse.clicked.connect(
+            lambda: self._browse_directory(self.ev_output_dir, "Select Evaluation Output Directory")
+        )
+        ev_output_dir_browse.setToolTip("Select where evaluation logs and summaries are saved.")
+        ev_output_dir_layout.addWidget(ev_output_dir_browse)
+        layout.addRow("Eval Output Dir", ev_output_dir_row)
+
+        self.ev_device = QtWidgets.QComboBox()
+        self.ev_device.addItems(["cpu", "cuda"])
+        self.ev_device.setCurrentText("cpu")
+        self.ev_device.setToolTip("Torch device for evaluation.")
+        layout.addRow("Device", self.ev_device)
+
+        self.ev_recurrent_policy = QtWidgets.QCheckBox()
+        self.ev_recurrent_policy.setChecked(True)
+        self.ev_recurrent_policy.setToolTip(
+            "Enable recurrent policy for RGSEAC checkpoints."
+        )
+        layout.addRow("Recurrent Policy", self.ev_recurrent_policy)
+
+        self.ev_relevance_gated = QtWidgets.QCheckBox()
+        self.ev_relevance_gated.setChecked(True)
+        self.ev_relevance_gated.setToolTip(
+            "Enable RGSEAC evaluation mode and gate computations."
+        )
+        layout.addRow("Relevance-Gated", self.ev_relevance_gated)
+
+        self.ev_relevance_gate_mode = QtWidgets.QComboBox()
+        self.ev_relevance_gate_mode.addItems(
+            [
+                "planner_context",
+                "latent_learned",
+                "constant_one",
+                "constant_target",
+            ]
+        )
+        self.ev_relevance_gate_mode.setCurrentText("planner_context")
+        self.ev_relevance_gate_mode.setToolTip("RGSEAC gate mode for evaluation.")
+        layout.addRow("Gate Mode", self.ev_relevance_gate_mode)
+
+        self.ev_use_global_planner = QtWidgets.QCheckBox()
+        self.ev_use_global_planner.setChecked(True)
+        self.ev_use_global_planner.setToolTip(
+            "Use planner-augmented observations during evaluation."
+        )
+        layout.addRow("Use Global Planner", self.ev_use_global_planner)
+
+        self.ev_planner_prefix_len = QtWidgets.QSpinBox()
+        self.ev_planner_prefix_len.setRange(1, 32)
+        self.ev_planner_prefix_len.setValue(3)
+        self.ev_planner_prefix_len.setToolTip(
+            "Planner path prefix length for evaluation."
+        )
+        layout.addRow("Planner Prefix Len", self.ev_planner_prefix_len)
+
+        self.ev_planner_feature_mode = QtWidgets.QComboBox()
+        self.ev_planner_feature_mode.addItems(["local", "basic"])
+        self.ev_planner_feature_mode.setCurrentText("local")
+        self.ev_planner_feature_mode.setToolTip(
+            "Must match the planner feature mode used during training."
+        )
+        layout.addRow("Planner Feature Mode", self.ev_planner_feature_mode)
+
+        self.ev_planner_recompute_interval = QtWidgets.QSpinBox()
+        self.ev_planner_recompute_interval.setRange(1, 1000)
+        self.ev_planner_recompute_interval.setValue(2)
+        self.ev_planner_recompute_interval.setToolTip(
+            "Planner recompute interval for evaluation."
+        )
+        layout.addRow(
+            "Planner Recompute Interval", self.ev_planner_recompute_interval
+        )
+
+        self.ev_log_gate_stats = QtWidgets.QCheckBox()
+        self.ev_log_gate_stats.setChecked(False)
+        self.ev_log_gate_stats.setToolTip(
+            "Log gate mean/variance over the episode."
+        )
+        layout.addRow("Log Gate Stats", self.ev_log_gate_stats)
+
+        self.ev_record_video = QtWidgets.QCheckBox()
+        self.ev_record_video.setChecked(False)
+        self.ev_record_video.setToolTip(
+            "Record evaluation rollout video files."
+        )
+        layout.addRow("Record Video", self.ev_record_video)
 
         run_button = QtWidgets.QPushButton("Run Evaluation")
         run_button.clicked.connect(self._run_evaluation)
@@ -680,6 +944,85 @@ class Launcher(QtWidgets.QMainWindow):
         self.gen_reward_delivery_weight.setValue(1.0)
         self.gen_reward_delivery_weight.setToolTip("Weight applied to delivery reward.")
         params_form.addRow("Delivery Weight", self.gen_reward_delivery_weight)
+
+        self.gen_planner_blocked_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_blocked_penalty.setDecimals(6)
+        self.gen_planner_blocked_penalty.setRange(0.0, 10.0)
+        self.gen_planner_blocked_penalty.setSingleStep(0.001)
+        self.gen_planner_blocked_penalty.setValue(0.01)
+        self.gen_planner_blocked_penalty.setToolTip(
+            "Training shaping: penalty when blocked by static layout."
+        )
+        params_form.addRow("Shape Static Blocked Penalty", self.gen_planner_blocked_penalty)
+
+        self.gen_planner_agent_blocked_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_agent_blocked_penalty.setDecimals(6)
+        self.gen_planner_agent_blocked_penalty.setRange(0.0, 10.0)
+        self.gen_planner_agent_blocked_penalty.setSingleStep(0.001)
+        self.gen_planner_agent_blocked_penalty.setValue(0.02)
+        self.gen_planner_agent_blocked_penalty.setToolTip(
+            "Training shaping: stronger penalty when blocked by another agent."
+        )
+        params_form.addRow(
+            "Shape Agent Blocked Penalty", self.gen_planner_agent_blocked_penalty
+        )
+
+        self.gen_planner_swap_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_swap_penalty.setDecimals(6)
+        self.gen_planner_swap_penalty.setRange(0.0, 10.0)
+        self.gen_planner_swap_penalty.setSingleStep(0.001)
+        self.gen_planner_swap_penalty.setValue(0.03)
+        self.gen_planner_swap_penalty.setToolTip(
+            "Training shaping: penalty for attempted agent-agent swaps."
+        )
+        params_form.addRow("Shape Swap Penalty", self.gen_planner_swap_penalty)
+
+        self.gen_planner_blocked_wait_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_blocked_wait_bonus.setDecimals(6)
+        self.gen_planner_blocked_wait_bonus.setRange(0.0, 10.0)
+        self.gen_planner_blocked_wait_bonus.setSingleStep(0.001)
+        self.gen_planner_blocked_wait_bonus.setValue(0.0)
+        self.gen_planner_blocked_wait_bonus.setToolTip(
+            "Training shaping: optional bonus for yielding/waiting when blocked."
+        )
+        params_form.addRow(
+            "Shape Blocked Wait Bonus", self.gen_planner_blocked_wait_bonus
+        )
+
+        self.gen_planner_unblocked_deviation_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_unblocked_deviation_penalty.setDecimals(6)
+        self.gen_planner_unblocked_deviation_penalty.setRange(0.0, 10.0)
+        self.gen_planner_unblocked_deviation_penalty.setSingleStep(0.001)
+        self.gen_planner_unblocked_deviation_penalty.setValue(0.004)
+        self.gen_planner_unblocked_deviation_penalty.setToolTip(
+            "Training shaping: penalty for off-plan deviation when unblocked."
+        )
+        params_form.addRow(
+            "Shape Unblocked Deviation Penalty",
+            self.gen_planner_unblocked_deviation_penalty,
+        )
+
+        self.gen_planner_follow_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_follow_bonus.setDecimals(6)
+        self.gen_planner_follow_bonus.setRange(0.0, 10.0)
+        self.gen_planner_follow_bonus.setSingleStep(0.001)
+        self.gen_planner_follow_bonus.setValue(0.006)
+        self.gen_planner_follow_bonus.setToolTip(
+            "Training shaping: bonus for following planned next move."
+        )
+        params_form.addRow("Shape Planner Follow Bonus", self.gen_planner_follow_bonus)
+
+        self.gen_planner_conflict_clear_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_conflict_clear_bonus.setDecimals(6)
+        self.gen_planner_conflict_clear_bonus.setRange(0.0, 10.0)
+        self.gen_planner_conflict_clear_bonus.setSingleStep(0.001)
+        self.gen_planner_conflict_clear_bonus.setValue(0.008)
+        self.gen_planner_conflict_clear_bonus.setToolTip(
+            "Training shaping: bonus for moving out of an active conflict pair."
+        )
+        params_form.addRow(
+            "Shape Conflict Clear Bonus", self.gen_planner_conflict_clear_bonus
+        )
 
         left_layout.addWidget(params_group)
 
@@ -1481,6 +1824,15 @@ class Launcher(QtWidgets.QMainWindow):
                 "cell_direction_constraints": constraint_list or None,
                 "image_observation_layers": selected_image_layers,
             },
+            "training_overrides": {
+                "algorithm.planner_blocked_penalty": self.gen_planner_blocked_penalty.value(),
+                "algorithm.planner_agent_blocked_penalty": self.gen_planner_agent_blocked_penalty.value(),
+                "algorithm.planner_swap_penalty": self.gen_planner_swap_penalty.value(),
+                "algorithm.planner_blocked_wait_bonus": self.gen_planner_blocked_wait_bonus.value(),
+                "algorithm.planner_unblocked_deviation_penalty": self.gen_planner_unblocked_deviation_penalty.value(),
+                "algorithm.planner_follow_bonus": self.gen_planner_follow_bonus.value(),
+                "algorithm.planner_conflict_clear_bonus": self.gen_planner_conflict_clear_bonus.value(),
+            },
         }
         return payload, ""
 
@@ -1618,6 +1970,17 @@ class Launcher(QtWidgets.QMainWindow):
             return
         target_widget.setText(directory)
 
+    def _browse_model_file(self):
+        initial_path = self.ev_path.text().strip() or str(self._trained_models_root())
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select Model Checkpoint",
+            initial_path,
+            "SEAC checkpoints (*.tar.xz);;All files (*)",
+        )
+        if filename:
+            self.ev_path.setText(filename)
+
     def _build_env_selector(self):
         row = QtWidgets.QWidget()
         layout = QtWidgets.QHBoxLayout(row)
@@ -1633,6 +1996,243 @@ class Launcher(QtWidgets.QMainWindow):
         layout.addWidget(combo, stretch=1)
         layout.addWidget(refresh)
         return row
+
+    def _trained_models_root(self):
+        return SEAC_DIR / "results" / "trained_models"
+
+    def _sacred_run_config_path(self, run_path):
+        run_id = Path(run_path).name
+        return SEAC_DIR / "results" / "sacred" / run_id / "config.json"
+
+    def _checkpoint_update(self, path):
+        match = re.search(r"u(\d+)(?:\.tar\.xz)?$", Path(path).name)
+        if not match:
+            return -1
+        return int(match.group(1))
+
+    def _scan_resume_runs(self):
+        root = self._trained_models_root()
+        if not root.exists():
+            return []
+        runs = [p for p in root.iterdir() if p.is_dir()]
+        return sorted(runs, key=lambda p: int(p.name) if p.name.isdigit() else -1, reverse=True)
+
+    def _scan_resume_checkpoints(self, run_path):
+        run_path = Path(run_path)
+        if not run_path.exists():
+            return []
+        checkpoints = []
+        for p in run_path.iterdir():
+            if p.is_dir() and self._checkpoint_update(p) >= 0:
+                checkpoints.append(p)
+            elif p.is_file() and p.name.endswith(".tar.xz") and self._checkpoint_update(p) >= 0:
+                checkpoints.append(p)
+        return sorted(checkpoints, key=self._checkpoint_update, reverse=True)
+
+    def _refresh_resume_runs(self):
+        if not hasattr(self, "tr_resume_run"):
+            return
+        current_run = self.tr_resume_run.currentData()
+        self.tr_resume_run.blockSignals(True)
+        self.tr_resume_run.clear()
+        self.tr_resume_run.addItem("Select run...", None)
+        for run in self._scan_resume_runs():
+            self.tr_resume_run.addItem(f"Run {run.name}", str(run))
+        self.tr_resume_run.blockSignals(False)
+        if current_run:
+            idx = self.tr_resume_run.findData(current_run)
+            if idx >= 0:
+                self.tr_resume_run.setCurrentIndex(idx)
+            else:
+                self._on_resume_run_selected()
+        elif self.tr_resume_run.count() > 1:
+            self.tr_resume_run.setCurrentIndex(1)
+        else:
+            self._on_resume_run_selected()
+
+    def _on_resume_run_selected(self, *_args):
+        if not hasattr(self, "tr_resume_checkpoint"):
+            return
+        run_path = self.tr_resume_run.currentData()
+        current_checkpoint = self.tr_resume_checkpoint.currentData()
+        self.tr_resume_checkpoint.clear()
+        self.tr_resume_checkpoint.addItem("Latest checkpoint", None)
+        if not run_path:
+            return
+        checkpoints = self._scan_resume_checkpoints(run_path)
+        for checkpoint in checkpoints:
+            update = self._checkpoint_update(checkpoint)
+            self.tr_resume_checkpoint.addItem(f"u{update}", str(checkpoint))
+        if current_checkpoint:
+            idx = self.tr_resume_checkpoint.findData(current_checkpoint)
+            if idx >= 0:
+                self.tr_resume_checkpoint.setCurrentIndex(idx)
+                return
+        if checkpoints:
+            self.tr_resume_checkpoint.setCurrentIndex(1)
+
+    def _selected_resume_checkpoint(self):
+        if not self.tr_resume_enabled.isChecked():
+            return None
+        checkpoint = self.tr_resume_checkpoint.currentData()
+        if checkpoint:
+            return checkpoint
+        run_path = self.tr_resume_run.currentData()
+        if not run_path:
+            return None
+        checkpoints = self._scan_resume_checkpoints(run_path)
+        if not checkpoints:
+            return None
+        return str(checkpoints[0])
+
+    def _selected_resume_run_id(self):
+        if not self.tr_resume_enabled.isChecked():
+            return None
+        run_path = self.tr_resume_run.currentData()
+        if not run_path:
+            return None
+        return Path(run_path).name
+
+    def _set_combo_text(self, combo, value):
+        value = str(value)
+        idx = combo.findText(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _load_selected_run_config(self):
+        run_path = self.tr_resume_run.currentData()
+        if not run_path:
+            QtWidgets.QMessageBox.warning(
+                self, "Missing run", "Please select a run first."
+            )
+            return
+        config_path = self._sacred_run_config_path(run_path)
+        if not config_path.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing config",
+                f"Sacred config not found:\n{config_path}",
+            )
+            return
+        try:
+            data = json.loads(config_path.read_text())
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Config load failed", str(exc)
+            )
+            return
+
+        algorithm = data.get("algorithm") or {}
+        env_config = data.get("env_config")
+        if env_config:
+            self.tr_env_config.setText(str(env_config))
+            self._select_env_config_path(str(env_config), data.get("env_name"))
+        self.tr_named_configs.clear()
+        if "seed" in data:
+            self._set_spin_value(self.tr_seed, int(data["seed"]))
+        if data.get("time_limit") is not None:
+            self._set_spin_value(self.tr_time_limit, int(data["time_limit"]))
+        if "num_env_steps" in data:
+            self.tr_num_env_steps.setText(str(int(float(data["num_env_steps"]))))
+
+        if "num_steps" in algorithm:
+            self._set_spin_value(self.tr_num_steps, int(algorithm["num_steps"]))
+        if "num_processes" in algorithm:
+            self._set_spin_value(
+                self.tr_num_processes, int(algorithm["num_processes"])
+            )
+        if "lr" in algorithm:
+            self.tr_lr.setValue(float(algorithm["lr"]))
+        if "gamma" in algorithm:
+            self.tr_gamma.setValue(float(algorithm["gamma"]))
+        if "use_gae" in algorithm:
+            self.tr_use_gae.setChecked(bool(algorithm["use_gae"]))
+        if "gae_lambda" in algorithm:
+            self.tr_gae_lambda.setValue(float(algorithm["gae_lambda"]))
+        if "use_linear_lr_decay" in algorithm:
+            self.tr_use_linear_lr_decay.setChecked(
+                bool(algorithm["use_linear_lr_decay"])
+            )
+        if "recurrent_policy" in algorithm:
+            self.tr_recurrent_policy.setChecked(bool(algorithm["recurrent_policy"]))
+        if "entropy_coef" in algorithm:
+            self.tr_entropy_coef.setValue(float(algorithm["entropy_coef"]))
+        if "value_loss_coef" in algorithm:
+            self.tr_value_loss_coef.setValue(float(algorithm["value_loss_coef"]))
+        if "seac_coef" in algorithm:
+            self.tr_seac_coef.setValue(float(algorithm["seac_coef"]))
+        if "use_global_planner" in algorithm:
+            self.tr_use_global_planner.setChecked(
+                bool(algorithm["use_global_planner"])
+            )
+        if "relevance_gated_seac" in algorithm:
+            self.tr_relevance_gated_seac.setChecked(
+                bool(algorithm["relevance_gated_seac"])
+            )
+        if "relevance_gate_mode" in algorithm:
+            self._set_combo_text(
+                self.tr_relevance_gate_mode, algorithm["relevance_gate_mode"]
+            )
+        if "planner_prefix_len" in algorithm:
+            self._set_spin_value(
+                self.tr_planner_prefix_len, int(algorithm["planner_prefix_len"])
+            )
+        if "planner_feature_mode" in algorithm:
+            self._set_combo_text(
+                self.tr_planner_feature_mode, algorithm["planner_feature_mode"]
+            )
+        if "planner_recompute_interval" in algorithm:
+            self._set_spin_value(
+                self.tr_planner_recompute_interval,
+                int(algorithm["planner_recompute_interval"]),
+            )
+        if "planner_blocked_penalty" in algorithm:
+            self.tr_planner_blocked_penalty.setValue(
+                float(algorithm["planner_blocked_penalty"])
+            )
+        if "planner_agent_blocked_penalty" in algorithm:
+            self.tr_planner_agent_blocked_penalty.setValue(
+                float(algorithm["planner_agent_blocked_penalty"])
+            )
+        if "planner_swap_penalty" in algorithm:
+            self.tr_planner_swap_penalty.setValue(
+                float(algorithm["planner_swap_penalty"])
+            )
+        if "planner_blocked_wait_bonus" in algorithm:
+            self.tr_planner_blocked_wait_bonus.setValue(
+                float(algorithm["planner_blocked_wait_bonus"])
+            )
+        if "planner_unblocked_deviation_penalty" in algorithm:
+            self.tr_planner_unblocked_deviation_penalty.setValue(
+                float(algorithm["planner_unblocked_deviation_penalty"])
+            )
+        if "planner_follow_bonus" in algorithm:
+            self.tr_planner_follow_bonus.setValue(
+                float(algorithm["planner_follow_bonus"])
+            )
+        if "planner_conflict_clear_bonus" in algorithm:
+            self.tr_planner_conflict_clear_bonus.setValue(
+                float(algorithm["planner_conflict_clear_bonus"])
+            )
+        if "device" in algorithm:
+            self._set_combo_text(self.tr_device, algorithm["device"])
+
+        for field, widget in (
+            ("log_interval", self.tr_log_interval),
+            ("save_interval", self.tr_save_interval),
+            ("eval_interval", self.tr_eval_interval),
+            ("episodes_per_eval", self.tr_episodes_per_eval),
+        ):
+            if field in data and data[field] is not None:
+                self._set_spin_value(widget, int(data[field]))
+        if data.get("save_dir") is not None:
+            self.tr_save_dir.setText(str(data["save_dir"]))
+        if data.get("eval_dir") is not None:
+            self.tr_eval_dir.setText(str(data["eval_dir"]))
+        if data.get("loss_dir") is not None:
+            self.tr_loss_dir.setText(str(data["loss_dir"]))
+
+        self._append_log(f"[launcher] loaded training config from {config_path}")
 
     def _scan_env_configs(self):
         entries = []
@@ -1695,6 +2295,7 @@ class Launcher(QtWidgets.QMainWindow):
         except Exception:
             return
         kwargs = data.get("kwargs") or {}
+        training_overrides = data.get("training_overrides") or {}
         if not isinstance(kwargs, dict):
             return
         self._env_config_loading = True
@@ -1761,6 +2362,74 @@ class Launcher(QtWidgets.QMainWindow):
                 self.gen_dedicated_requests.setChecked(bool(kwargs["dedicated_requests"]))
             if "reward_delivery_weight" in kwargs:
                 self.gen_reward_delivery_weight.setValue(float(kwargs["reward_delivery_weight"]))
+            if isinstance(training_overrides, dict):
+                if "algorithm.planner_blocked_penalty" in training_overrides:
+                    blocked_penalty = float(
+                        training_overrides["algorithm.planner_blocked_penalty"]
+                    )
+                    self.gen_planner_blocked_penalty.setValue(blocked_penalty)
+                    if hasattr(self, "tr_planner_blocked_penalty"):
+                        self.tr_planner_blocked_penalty.setValue(blocked_penalty)
+                if "algorithm.planner_agent_blocked_penalty" in training_overrides:
+                    agent_blocked_penalty = float(
+                        training_overrides[
+                            "algorithm.planner_agent_blocked_penalty"
+                        ]
+                    )
+                    self.gen_planner_agent_blocked_penalty.setValue(
+                        agent_blocked_penalty
+                    )
+                    if hasattr(self, "tr_planner_agent_blocked_penalty"):
+                        self.tr_planner_agent_blocked_penalty.setValue(
+                            agent_blocked_penalty
+                        )
+                if "algorithm.planner_swap_penalty" in training_overrides:
+                    swap_penalty = float(
+                        training_overrides["algorithm.planner_swap_penalty"]
+                    )
+                    self.gen_planner_swap_penalty.setValue(swap_penalty)
+                    if hasattr(self, "tr_planner_swap_penalty"):
+                        self.tr_planner_swap_penalty.setValue(swap_penalty)
+                if "algorithm.planner_blocked_wait_bonus" in training_overrides:
+                    blocked_wait_bonus = float(
+                        training_overrides["algorithm.planner_blocked_wait_bonus"]
+                    )
+                    self.gen_planner_blocked_wait_bonus.setValue(blocked_wait_bonus)
+                    if hasattr(self, "tr_planner_blocked_wait_bonus"):
+                        self.tr_planner_blocked_wait_bonus.setValue(blocked_wait_bonus)
+                if "algorithm.planner_unblocked_deviation_penalty" in training_overrides:
+                    unblocked_deviation_penalty = float(
+                        training_overrides[
+                            "algorithm.planner_unblocked_deviation_penalty"
+                        ]
+                    )
+                    self.gen_planner_unblocked_deviation_penalty.setValue(
+                        unblocked_deviation_penalty
+                    )
+                    if hasattr(self, "tr_planner_unblocked_deviation_penalty"):
+                        self.tr_planner_unblocked_deviation_penalty.setValue(
+                            unblocked_deviation_penalty
+                        )
+                if "algorithm.planner_follow_bonus" in training_overrides:
+                    planner_follow_bonus = float(
+                        training_overrides["algorithm.planner_follow_bonus"]
+                    )
+                    self.gen_planner_follow_bonus.setValue(planner_follow_bonus)
+                    if hasattr(self, "tr_planner_follow_bonus"):
+                        self.tr_planner_follow_bonus.setValue(planner_follow_bonus)
+                if "algorithm.planner_conflict_clear_bonus" in training_overrides:
+                    conflict_clear_bonus = float(
+                        training_overrides[
+                            "algorithm.planner_conflict_clear_bonus"
+                        ]
+                    )
+                    self.gen_planner_conflict_clear_bonus.setValue(
+                        conflict_clear_bonus
+                    )
+                    if hasattr(self, "tr_planner_conflict_clear_bonus"):
+                        self.tr_planner_conflict_clear_bonus.setValue(
+                            conflict_clear_bonus
+                        )
             self._set_image_layer_checks(kwargs.get("image_observation_layers"))
 
             layout_value = kwargs.get("layout")
@@ -1792,6 +2461,13 @@ class Launcher(QtWidgets.QMainWindow):
         self.gen_lane_observation.setChecked(False)
         self.gen_dedicated_requests.setChecked(True)
         self.gen_reward_delivery_weight.setValue(1.0)
+        self.gen_planner_blocked_penalty.setValue(0.01)
+        self.gen_planner_agent_blocked_penalty.setValue(0.02)
+        self.gen_planner_swap_penalty.setValue(0.03)
+        self.gen_planner_blocked_wait_bonus.setValue(0.0)
+        self.gen_planner_unblocked_deviation_penalty.setValue(0.004)
+        self.gen_planner_follow_bonus.setValue(0.006)
+        self.gen_planner_conflict_clear_bonus.setValue(0.008)
         self._set_image_layer_checks(list(_DEFAULT_IMAGE_LAYERS))
         self.brush_select.setChecked(True)
         self.brush_lane_up.setChecked(True)
@@ -1944,8 +2620,28 @@ class Launcher(QtWidgets.QMainWindow):
                 for token in re.split(r"[,\s]+", named_configs_text)
                 if token
             ]
+        resume_checkpoint = self._selected_resume_checkpoint()
+        resume_run_id = self._selected_resume_run_id()
+        if self.tr_resume_enabled.isChecked() and not resume_checkpoint:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing resume checkpoint",
+                "Please select a previous run/checkpoint or disable Resume Training.",
+            )
+            return
+        if self.tr_resume_enabled.isChecked() and not resume_run_id:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Missing resume run",
+                "Please select the previous run id to resume into.",
+            )
+            return
         args = [
             "seac/train.py",
+        ]
+        if resume_run_id:
+            args.extend(["--id", resume_run_id])
+        args.extend([
             "with",
             *named_configs,
             f"env_name={env_name}",
@@ -1970,10 +2666,21 @@ class Launcher(QtWidgets.QMainWindow):
             f"algorithm.entropy_coef={self.tr_entropy_coef.value()}",
             f"algorithm.value_loss_coef={self.tr_value_loss_coef.value()}",
             f"algorithm.seac_coef={self.tr_seac_coef.value()}",
+            f"algorithm.use_global_planner={self.tr_use_global_planner.isChecked()}",
+            f"algorithm.relevance_gated_seac={self.tr_relevance_gated_seac.isChecked()}",
+            f"algorithm.relevance_gate_mode={self.tr_relevance_gate_mode.currentText()}",
+            f"algorithm.planner_prefix_len={self.tr_planner_prefix_len.value()}",
+            f"algorithm.planner_feature_mode={self.tr_planner_feature_mode.currentText()}",
+            f"algorithm.planner_recompute_interval={self.tr_planner_recompute_interval.value()}",
             f"algorithm.device={self.tr_device.currentText()}",
-        ]
+        ])
         if env_config:
             args.append(f"env_config={env_config}")
+        if resume_checkpoint:
+            args.append(f"resume_checkpoint={resume_checkpoint}")
+            update = self._checkpoint_update(resume_checkpoint)
+            if update >= 0:
+                args.append(f"resume_start_update={update}")
         self._start_process(SEAC_DIR, args)
 
     def _run_evaluation(self):
@@ -2004,7 +2711,31 @@ class Launcher(QtWidgets.QMainWindow):
             str(self.ev_time_limit.value()),
             "--episodes",
             str(self.ev_episodes.value()),
+            "--eval-dir",
+            self.ev_output_dir.text().strip() or "seac_eval",
+            "--device",
+            self.ev_device.currentText(),
+            "--relevance-gate-mode",
+            self.ev_relevance_gate_mode.currentText(),
+            "--planner-prefix-len",
+            str(self.ev_planner_prefix_len.value()),
+            "--planner-feature-mode",
+            self.ev_planner_feature_mode.currentText(),
+            "--planner-recompute-interval",
+            str(self.ev_planner_recompute_interval.value()),
         ]
+        if self.ev_recurrent_policy.isChecked():
+            args.append("--recurrent-policy")
+        if self.ev_relevance_gated.isChecked():
+            args.append("--relevance-gated")
+        if self.ev_use_global_planner.isChecked():
+            args.append("--use-global-planner")
+        if self.ev_log_gate_stats.isChecked():
+            args.append("--log-gate-stats")
+        if self.ev_record_video.isChecked():
+            args.append("--record-video")
+        else:
+            args.append("--no-record-video")
         if env_config:
             args.extend(["--env-config", env_config])
         self._start_process(SEAC_DIR, args)

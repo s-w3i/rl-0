@@ -2,7 +2,11 @@ import glob
 import logging
 import os
 import shutil
+import re
+import tempfile
 import time
+import copy
+from contextlib import contextmanager
 from collections import deque
 from os import path
 from pathlib import Path
@@ -22,14 +26,25 @@ import utils
 from a2c import A2C, RGSEAC, algorithm
 from envs import make_vec_envs
 from wrappers import RecordEpisodeStatistics, SquashDones
-from model import Policy
 
 import robotic_warehouse # noqa
+from robotic_warehouse import load_env_training_overrides
 import lbforaging # noqa
 
 ex = Experiment(ingredients=[algorithm])
 ex.captured_out_filter = lambda captured_output: "Output capturing turned off."
-ex.observers.append(FileStorageObserver("./results/sacred"))
+
+
+class ResumeFileStorageObserver(FileStorageObserver):
+    def _make_run_dir(self, _id):
+        if _id is None:
+            return super()._make_run_dir(_id)
+        os.makedirs(self.basedir, exist_ok=True)
+        self.dir = os.path.join(self.basedir, str(_id))
+        os.makedirs(self.dir, exist_ok=True)
+
+
+ex.observers.append(ResumeFileStorageObserver("./results/sacred"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,6 +74,8 @@ def config():
     save_interval = int(1e6)
     eval_interval = int(1e6)
     episodes_per_eval = 8
+    resume_checkpoint = None
+    resume_start_update = None
 
 
 for conf in glob.glob("configs/*.yaml"):
@@ -84,6 +101,150 @@ def _squash_info(info):
         mean = np.mean(values)
         new_info[key] = mean
     return new_info
+
+
+def _planner_kwargs(algorithm):
+    return {
+        "use_global_planner": algorithm["use_global_planner"],
+        "planner_type": algorithm["planner_type"],
+        "planner_recompute_interval": algorithm["planner_recompute_interval"],
+        "planner_prefix_len": algorithm["planner_prefix_len"],
+        "planner_feature_mode": algorithm["planner_feature_mode"],
+        "blocked_penalty": algorithm["planner_blocked_penalty"],
+        "agent_blocked_penalty": algorithm["planner_agent_blocked_penalty"],
+        "swap_penalty": algorithm["planner_swap_penalty"],
+        "blocked_wait_bonus": algorithm["planner_blocked_wait_bonus"],
+        "unblocked_deviation_penalty": algorithm[
+            "planner_unblocked_deviation_penalty"
+        ],
+        "planner_follow_bonus": algorithm["planner_follow_bonus"],
+        "conflict_clear_bonus": algorithm["planner_conflict_clear_bonus"],
+    }
+
+
+def _coerce_override_value(current_value, override_value):
+    if isinstance(current_value, bool):
+        if isinstance(override_value, bool):
+            return override_value
+        return str(override_value).strip().lower() in {"1", "true", "yes", "on"}
+    if isinstance(current_value, int) and not isinstance(current_value, bool):
+        return int(override_value)
+    if isinstance(current_value, float):
+        return float(override_value)
+    return override_value
+
+
+def _apply_env_training_overrides(algorithm, env_config, _log, _run):
+    effective = copy.deepcopy(algorithm)
+    if not env_config:
+        return effective
+    overrides = load_env_training_overrides(env_config)
+    allowed_override_keys = {
+        "planner_blocked_penalty",
+        "planner_agent_blocked_penalty",
+        "planner_swap_penalty",
+        "planner_blocked_wait_bonus",
+        "planner_unblocked_deviation_penalty",
+        "planner_follow_bonus",
+        "planner_conflict_clear_bonus",
+    }
+    applied = {}
+    for full_key, value in overrides.items():
+        parts = str(full_key).split(".")
+        if len(parts) != 2 or parts[0] != "algorithm":
+            _log.warning(
+                f"Ignoring unsupported env training override {full_key!r}; "
+                "only algorithm.* overrides are supported."
+            )
+            continue
+        key = parts[1]
+        if key not in allowed_override_keys:
+            _log.warning(
+                f"Ignoring env training override {full_key!r}; env JSON overrides "
+                "are limited to reward-shaping algorithm keys."
+            )
+            continue
+        if key not in effective:
+            _log.warning(
+                f"Ignoring unknown env training override {full_key!r}; "
+                "no matching algorithm config key exists."
+            )
+            continue
+        effective[key] = _coerce_override_value(effective[key], value)
+        applied[full_key] = effective[key]
+    if applied:
+        _run.info["env_training_overrides_applied"] = applied
+        _log.info(f"Applied env training overrides from {env_config}: {applied}")
+    return effective
+
+
+def _checkpoint_update(checkpoint_path):
+    name = Path(checkpoint_path).name
+    match = re.search(r"u(\d+)(?:\.tar\.xz)?$", name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _max_checkpoint_update(checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    if not checkpoint_dir.exists():
+        return None
+    updates = []
+    for candidate in checkpoint_dir.iterdir():
+        update = _checkpoint_update(candidate)
+        if update is not None:
+            updates.append(update)
+    if not updates:
+        return None
+    return max(updates)
+
+
+def _optimizer_to_device(optimizer, device):
+    for state in optimizer.state.values():
+        for key, value in list(state.items()):
+            if torch.is_tensor(value):
+                state[key] = value.to(device)
+
+
+def _agent_checkpoint_root(checkpoint_dir):
+    checkpoint_dir = Path(checkpoint_dir)
+    if (checkpoint_dir / "agent0" / "models.pt").exists():
+        return checkpoint_dir
+    candidates = [
+        candidate
+        for candidate in checkpoint_dir.iterdir()
+        if candidate.is_dir() and (candidate / "agent0" / "models.pt").exists()
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return checkpoint_dir
+
+
+@contextmanager
+def _restorable_checkpoint_dir(checkpoint_path):
+    checkpoint_path = Path(checkpoint_path).expanduser()
+    if checkpoint_path.is_dir():
+        yield _agent_checkpoint_root(checkpoint_path)
+        return
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Resume checkpoint does not exist: {checkpoint_path}")
+    if checkpoint_path.suffixes[-2:] != [".tar", ".xz"]:
+        raise ValueError(
+            "Resume checkpoint must be a checkpoint directory or .tar.xz archive."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="seac_resume_") as tmpdir:
+        shutil.unpack_archive(str(checkpoint_path), tmpdir)
+        yield _agent_checkpoint_root(tmpdir)
+
+
+def _safe_cleanup_run_dir(directory, resume_checkpoint):
+    if resume_checkpoint:
+        os.makedirs(directory, exist_ok=True)
+        return
+    utils.cleanup_log_dir(directory)
 
 
 @ex.capture
@@ -112,6 +273,7 @@ def evaluate(
         device,
         monitor_dir=monitor_dir,
         env_config=env_config,
+        planner_kwargs=_planner_kwargs(algorithm),
     )
 
     n_obs = eval_envs.reset()
@@ -154,6 +316,25 @@ def evaluate(
     _log.info(
         f"Evaluation using {len(all_infos)} episodes: mean reward {info['episode_reward']:.5f}\n"
     )
+    for key in (
+        "path_adherence_rate",
+        "blocked_planned_step_frequency",
+        "planner_follow_rate",
+        "blocked_wait_rate",
+        "blocked_rotate_rate",
+        "blocked_other_rate",
+        "unblocked_deviation_rate",
+        "local_deviation_count",
+        "episode_moved_total",
+        "episode_rotation_total",
+        "episode_noop_total",
+        "episode_forward_total",
+        "episode_blocked_total",
+        "episode_vertex_conflict_total",
+        "episode_conflict_clear_total",
+    ):
+        if key in info:
+            _log.info(f"Evaluation {key}: {info[key]:.5f}")
 
 
 @ex.automain
@@ -174,13 +355,22 @@ def main(
     log_interval,
     save_interval,
     eval_interval,
+    resume_checkpoint,
+    resume_start_update,
 ):
+    algorithm = _apply_env_training_overrides(algorithm, env_config, _log, _run)
     if algorithm["relevance_gated_seac"] and not algorithm["recurrent_policy"]:
         raise ValueError("RGSEAC requires algorithm.recurrent_policy=True.")
+    if (
+        algorithm["relevance_gated_seac"]
+        and algorithm["relevance_gate_mode"] == "planner_context"
+        and not algorithm["use_global_planner"]
+    ):
+        raise ValueError("planner_context RGSEAC requires algorithm.use_global_planner=True.")
 
     if loss_dir:
         loss_dir = path.expanduser(loss_dir.format(id=str(_run._id)))
-        utils.cleanup_log_dir(loss_dir)
+        _safe_cleanup_run_dir(loss_dir, resume_checkpoint)
         writer = SummaryWriter(loss_dir)
     else:
         writer = None
@@ -188,8 +378,8 @@ def main(
     eval_dir = path.expanduser(eval_dir.format(id=str(_run._id)))
     save_dir = path.expanduser(save_dir.format(id=str(_run._id)))
 
-    utils.cleanup_log_dir(eval_dir)
-    utils.cleanup_log_dir(save_dir)
+    _safe_cleanup_run_dir(eval_dir, resume_checkpoint)
+    _safe_cleanup_run_dir(save_dir, resume_checkpoint)
 
     torch.set_num_threads(1)
     envs = make_vec_envs(
@@ -201,6 +391,7 @@ def main(
         wrappers,
         algorithm["device"],
         env_config=env_config,
+        planner_kwargs=_planner_kwargs(algorithm),
     )
 
     agent_cls = RGSEAC if algorithm["relevance_gated_seac"] else A2C
@@ -208,6 +399,23 @@ def main(
         agent_cls(i, osp, asp)
         for i, (osp, asp) in enumerate(zip(envs.observation_space, envs.action_space))
     ]
+
+    inferred_resume_update = None
+    if resume_checkpoint:
+        with _restorable_checkpoint_dir(resume_checkpoint) as checkpoint_dir:
+            for agent in agents:
+                agent_path = checkpoint_dir / f"agent{agent.agent_id}"
+                if not agent_path.exists():
+                    raise FileNotFoundError(
+                        f"Missing checkpoint for agent{agent.agent_id}: {agent_path}"
+                    )
+                agent.restore(str(agent_path))
+                _optimizer_to_device(agent.optimizer, algorithm["device"])
+        inferred_resume_update = _checkpoint_update(resume_checkpoint)
+        _log.info(
+            f"Resumed agent model/optimizer state from {resume_checkpoint}"
+        )
+
     obs = envs.reset()
 
     for i in range(len(obs)):
@@ -218,10 +426,35 @@ def main(
     num_updates = (
         int(num_env_steps) // algorithm["num_steps"] // algorithm["num_processes"]
     )
+    start_update = int(
+        resume_start_update
+        if resume_start_update is not None
+        else inferred_resume_update
+        if inferred_resume_update is not None
+        else 0
+    )
+    if resume_checkpoint:
+        max_existing_update = _max_checkpoint_update(save_dir)
+        if max_existing_update is not None and max_existing_update > start_update:
+            raise ValueError(
+                f"Refusing to resume run {_run._id} from u{start_update} because "
+                f"{save_dir} already contains newer checkpoint u{max_existing_update}. "
+                "Resume from the latest checkpoint or use a different run id."
+            )
+    if start_update >= num_updates:
+        _log.info(
+            f"Resume checkpoint update {start_update} is already at or beyond target "
+            f"num_updates {num_updates}; no training updates to run."
+        )
+        envs.close()
+        if writer:
+            writer.close()
+        return
 
     all_infos = deque(maxlen=10)
+    loss_infos = deque(maxlen=max(1, log_interval * max(1, len(agents))))
 
-    for j in range(1, num_updates + 1):
+    for j in range(start_update + 1, num_updates + 1):
 
         for step in range(algorithm["num_steps"]):
             # Sample actions
@@ -277,6 +510,7 @@ def main(
 
         for agent in agents:
             loss = agent.update(agents)
+            loss_infos.append(loss)
             for k, v in loss.items():
                 if writer:
                     writer.add_scalar(f"agent{agent.agent_id}/{k}", v, j)
@@ -302,6 +536,23 @@ def main(
 
             for k, v in squashed.items():
                 _run.log_scalar(k, v, j)
+            if loss_infos:
+                loss_keys = sorted({key for loss in loss_infos for key in loss})
+                loss_means = {}
+                for key in loss_keys:
+                    values = [float(loss[key]) for loss in loss_infos if key in loss]
+                    if values:
+                        mean_value = float(np.mean(values))
+                        loss_means[key] = mean_value
+                        _run.log_scalar(f"loss_{key}", mean_value, j)
+                if "gate_mean" in loss_means:
+                    _log.info(
+                        "Loss gate mean %.4f, var %.6f, target %.4f",
+                        loss_means.get("gate_mean", 0.0),
+                        loss_means.get("gate_var", 0.0),
+                        loss_means.get("gate_context_target_mean", 0.0),
+                    )
+                loss_infos.clear()
             all_infos.clear()
 
         if save_interval is not None and (
@@ -320,9 +571,11 @@ def main(
             j > 0 and j % eval_interval == 0 or j == num_updates
         ):
             evaluate(
-                agents, os.path.join(eval_dir, f"u{j}"),
+                agents, os.path.join(eval_dir, f"u{j}"), algorithm=algorithm
             )
             videos = glob.glob(os.path.join(eval_dir, f"u{j}") + "/*.mp4")
             for i, v in enumerate(videos):
                 _run.add_artifact(v, f"u{j}.{i}.mp4")
     envs.close()
+    if writer:
+        writer.close()

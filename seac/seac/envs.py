@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from gymnasium import spaces as gym_spaces
 
+from planner import maybe_add_planner_hints
 from robotic_warehouse import load_env_config
 from wrappers import TimeLimit, Monitor, FlattenObservation
 
@@ -21,7 +22,16 @@ def _needs_flatten(env):
     return any(isinstance(space, (gym_spaces.Dict, gym_spaces.Tuple)) for space in obs_space.spaces)
 
 
-def make_env(env_id, seed, rank, time_limit, wrappers, monitor_dir, env_config=None):
+def make_env(
+    env_id,
+    seed,
+    rank,
+    time_limit,
+    wrappers,
+    monitor_dir,
+    env_config=None,
+    planner_kwargs=None,
+):
     if env_config:
         config_env_id, config_kwargs = load_env_config(env_config)
         env_name = _gymnasium_env_name(config_env_id)
@@ -33,6 +43,7 @@ def make_env(env_id, seed, rank, time_limit, wrappers, monitor_dir, env_config=N
     if _needs_flatten(env):
         env = FlattenObservation(env)
         env.reset(seed=seed + rank)
+    env = maybe_add_planner_hints(env, **(planner_kwargs or {}))
 
     if time_limit:
         env = TimeLimit(env, time_limit)
@@ -119,9 +130,19 @@ def make_vec_envs(
     device,
     monitor_dir=None,
     env_config=None,
+    planner_kwargs=None,
 ):
     envs = [
-        make_env(env_name, seed, i, time_limit, wrappers, monitor_dir, env_config)
+        make_env(
+            env_name,
+            seed,
+            i,
+            time_limit,
+            wrappers,
+            monitor_dir,
+            env_config,
+            planner_kwargs=planner_kwargs,
+        )
         for i in range(parallel)
     ]
     return MAGymnasiumVecEnv(envs, device)

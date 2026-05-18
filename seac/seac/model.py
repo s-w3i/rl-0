@@ -47,7 +47,7 @@ class FCNetwork(nn.Module):
 
 
 class RelevanceGate(nn.Module):
-    def __init__(self, feature_dim, hidden_dim=64, min_weight=0.25):
+    def __init__(self, input_dim, hidden_dim=64, min_weight=0.25):
         super().__init__()
 
         init_ = lambda m: init(
@@ -59,21 +59,12 @@ class RelevanceGate(nn.Module):
 
         self.min_weight = float(min_weight)
         self.net = nn.Sequential(
-            init_(nn.Linear(feature_dim * 4, hidden_dim)),
+            init_(nn.Linear(input_dim, hidden_dim)),
             nn.ReLU(),
             init_out(nn.Linear(hidden_dim, 1)),
         )
 
-    def forward(self, target_features, source_features):
-        gate_input = torch.cat(
-            [
-                target_features,
-                source_features,
-                (target_features - source_features).abs(),
-                target_features * source_features,
-            ],
-            dim=-1,
-        )
+    def forward(self, gate_input):
         gate = torch.sigmoid(self.net(gate_input))
         return self.min_weight + (1.0 - self.min_weight) * gate
 
@@ -86,6 +77,7 @@ class Policy(nn.Module):
         base=None,
         base_kwargs=None,
         enable_relevance_gate=False,
+        relevance_gate_input_dim=None,
         relevance_gate_hidden_dim=64,
         relevance_gate_min_weight=0.25,
     ):
@@ -99,8 +91,11 @@ class Policy(nn.Module):
         self.base = MLPBase(obs_shape[0], **base_kwargs)
         self.relevance_gate = None
         if enable_relevance_gate:
+            gate_input_dim = relevance_gate_input_dim
+            if gate_input_dim is None:
+                gate_input_dim = self.base.output_size * 4
             self.relevance_gate = RelevanceGate(
-                self.base.output_size,
+                gate_input_dim,
                 hidden_dim=relevance_gate_hidden_dim,
                 min_weight=relevance_gate_min_weight,
             )
