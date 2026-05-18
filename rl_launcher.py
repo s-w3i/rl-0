@@ -967,6 +967,30 @@ class Launcher(QtWidgets.QMainWindow):
             "Shape Agent Blocked Penalty", self.gen_planner_agent_blocked_penalty
         )
 
+        self.gen_planner_persistent_agent_blocked_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_persistent_agent_blocked_penalty.setDecimals(6)
+        self.gen_planner_persistent_agent_blocked_penalty.setRange(0.0, 10.0)
+        self.gen_planner_persistent_agent_blocked_penalty.setSingleStep(0.001)
+        self.gen_planner_persistent_agent_blocked_penalty.setValue(0.01)
+        self.gen_planner_persistent_agent_blocked_penalty.setToolTip(
+            "Training shaping: extra escalating penalty after repeated agent blocking."
+        )
+        params_form.addRow(
+            "Shape Persistent Agent Block Penalty",
+            self.gen_planner_persistent_agent_blocked_penalty,
+        )
+
+        self.gen_planner_persistent_agent_block_threshold = QtWidgets.QSpinBox()
+        self.gen_planner_persistent_agent_block_threshold.setRange(1, 1000)
+        self.gen_planner_persistent_agent_block_threshold.setValue(5)
+        self.gen_planner_persistent_agent_block_threshold.setToolTip(
+            "Consecutive agent-blocked steps before persistent-block penalty starts."
+        )
+        params_form.addRow(
+            "Shape Persistent Block Threshold",
+            self.gen_planner_persistent_agent_block_threshold,
+        )
+
         self.gen_planner_swap_penalty = QtWidgets.QDoubleSpinBox()
         self.gen_planner_swap_penalty.setDecimals(6)
         self.gen_planner_swap_penalty.setRange(0.0, 10.0)
@@ -1832,6 +1856,8 @@ class Launcher(QtWidgets.QMainWindow):
                 "algorithm.planner_unblocked_deviation_penalty": self.gen_planner_unblocked_deviation_penalty.value(),
                 "algorithm.planner_follow_bonus": self.gen_planner_follow_bonus.value(),
                 "algorithm.planner_conflict_clear_bonus": self.gen_planner_conflict_clear_bonus.value(),
+                "algorithm.planner_persistent_agent_blocked_penalty": self.gen_planner_persistent_agent_blocked_penalty.value(),
+                "algorithm.planner_persistent_agent_block_threshold": self.gen_planner_persistent_agent_block_threshold.value(),
             },
         }
         return payload, ""
@@ -2383,6 +2409,31 @@ class Launcher(QtWidgets.QMainWindow):
                         self.tr_planner_agent_blocked_penalty.setValue(
                             agent_blocked_penalty
                         )
+                if (
+                    "algorithm.planner_persistent_agent_blocked_penalty"
+                    in training_overrides
+                ):
+                    persistent_agent_blocked_penalty = float(
+                        training_overrides[
+                            "algorithm.planner_persistent_agent_blocked_penalty"
+                        ]
+                    )
+                    self.gen_planner_persistent_agent_blocked_penalty.setValue(
+                        persistent_agent_blocked_penalty
+                    )
+                if (
+                    "algorithm.planner_persistent_agent_block_threshold"
+                    in training_overrides
+                ):
+                    persistent_agent_block_threshold = int(
+                        training_overrides[
+                            "algorithm.planner_persistent_agent_block_threshold"
+                        ]
+                    )
+                    self._set_spin_value(
+                        self.gen_planner_persistent_agent_block_threshold,
+                        persistent_agent_block_threshold,
+                    )
                 if "algorithm.planner_swap_penalty" in training_overrides:
                     swap_penalty = float(
                         training_overrides["algorithm.planner_swap_penalty"]
@@ -2463,6 +2514,8 @@ class Launcher(QtWidgets.QMainWindow):
         self.gen_reward_delivery_weight.setValue(1.0)
         self.gen_planner_blocked_penalty.setValue(0.01)
         self.gen_planner_agent_blocked_penalty.setValue(0.02)
+        self.gen_planner_persistent_agent_blocked_penalty.setValue(0.01)
+        self.gen_planner_persistent_agent_block_threshold.setValue(5)
         self.gen_planner_swap_penalty.setValue(0.03)
         self.gen_planner_blocked_wait_bonus.setValue(0.0)
         self.gen_planner_unblocked_deviation_penalty.setValue(0.004)

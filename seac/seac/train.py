@@ -119,6 +119,12 @@ def _planner_kwargs(algorithm):
         ],
         "planner_follow_bonus": algorithm["planner_follow_bonus"],
         "conflict_clear_bonus": algorithm["planner_conflict_clear_bonus"],
+        "persistent_agent_blocked_penalty": algorithm[
+            "planner_persistent_agent_blocked_penalty"
+        ],
+        "persistent_agent_block_threshold": algorithm[
+            "planner_persistent_agent_block_threshold"
+        ],
     }
 
 
@@ -147,6 +153,8 @@ def _apply_env_training_overrides(algorithm, env_config, _log, _run):
         "planner_unblocked_deviation_penalty",
         "planner_follow_bonus",
         "planner_conflict_clear_bonus",
+        "planner_persistent_agent_blocked_penalty",
+        "planner_persistent_agent_block_threshold",
     }
     applied = {}
     for full_key, value in overrides.items():
@@ -330,8 +338,14 @@ def evaluate(
         "episode_noop_total",
         "episode_forward_total",
         "episode_blocked_total",
+        "episode_blocked_agent_total",
+        "episode_blocked_static_total",
         "episode_vertex_conflict_total",
         "episode_conflict_clear_total",
+        "episode_max_consecutive_agent_blocked",
+        "episode_max_consecutive_no_progress",
+        "episode_persistent_agent_block_events",
+        "episode_persistent_no_progress_events",
     ):
         if key in info:
             _log.info(f"Evaluation {key}: {info[key]:.5f}")

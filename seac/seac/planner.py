@@ -408,6 +408,8 @@ class PlannerObservationWrapper(gym.Wrapper):
         unblocked_deviation_penalty=0.0,
         planner_follow_bonus=0.0,
         conflict_clear_bonus=0.0,
+        persistent_agent_blocked_penalty=0.0,
+        persistent_agent_block_threshold=5,
     ):
         _check_planner_feature_mode(planner_feature_mode)
         super().__init__(env)
@@ -425,6 +427,12 @@ class PlannerObservationWrapper(gym.Wrapper):
         self.unblocked_deviation_penalty = float(unblocked_deviation_penalty)
         self.planner_follow_bonus = float(planner_follow_bonus)
         self.conflict_clear_bonus = float(conflict_clear_bonus)
+        self.persistent_agent_blocked_penalty = float(
+            persistent_agent_blocked_penalty
+        )
+        self.persistent_agent_block_threshold = max(
+            1, int(persistent_agent_block_threshold)
+        )
         self.observation_space = append_planner_observation_space(
             env.observation_space, planner_prefix_len, planner_feature_mode
         )
@@ -456,6 +464,9 @@ class PlannerObservationWrapper(gym.Wrapper):
         conflict_clear_by_agent = _info_array(
             info, "step_conflict_clear_by_agent", len(shaped)
         )
+        consecutive_agent_blocked = _info_array(
+            info, "agent_consecutive_agent_blocked", len(shaped)
+        )
         has_block_breakdown = (
             blocked_static_by_agent is not None or blocked_agent_by_agent is not None
         )
@@ -479,6 +490,20 @@ class PlannerObservationWrapper(gym.Wrapper):
                 shaping_by_agent[idx] -= self.blocked_penalty
             if agent_conflict_blocked:
                 shaping_by_agent[idx] -= self.agent_blocked_penalty
+                if (
+                    consecutive_agent_blocked is not None
+                    and self.persistent_agent_blocked_penalty != 0.0
+                    and consecutive_agent_blocked[idx]
+                    >= self.persistent_agent_block_threshold
+                ):
+                    over_threshold = (
+                        consecutive_agent_blocked[idx]
+                        - self.persistent_agent_block_threshold
+                        + 1
+                    )
+                    shaping_by_agent[idx] -= (
+                        self.persistent_agent_blocked_penalty * over_threshold
+                    )
             elif pre_blocked[idx] > 0.5 and action_values[idx] != 0:
                 shaping_by_agent[idx] -= self.agent_blocked_penalty
             if swap_by_agent is not None and swap_by_agent[idx] > 0:
@@ -533,6 +558,8 @@ def maybe_add_planner_hints(
     unblocked_deviation_penalty=0.0,
     planner_follow_bonus=0.0,
     conflict_clear_bonus=0.0,
+    persistent_agent_blocked_penalty=0.0,
+    persistent_agent_block_threshold=5,
 ):
     if not use_global_planner:
         return env
@@ -549,6 +576,8 @@ def maybe_add_planner_hints(
         unblocked_deviation_penalty=unblocked_deviation_penalty,
         planner_follow_bonus=planner_follow_bonus,
         conflict_clear_bonus=conflict_clear_bonus,
+        persistent_agent_blocked_penalty=persistent_agent_blocked_penalty,
+        persistent_agent_block_threshold=persistent_agent_block_threshold,
     )
 
 

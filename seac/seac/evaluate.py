@@ -110,6 +110,8 @@ def _planner_reward_shaping_kwargs(env_config, enabled=True):
         "algorithm.planner_unblocked_deviation_penalty": "unblocked_deviation_penalty",
         "algorithm.planner_follow_bonus": "planner_follow_bonus",
         "algorithm.planner_conflict_clear_bonus": "conflict_clear_bonus",
+        "algorithm.planner_persistent_agent_blocked_penalty": "persistent_agent_blocked_penalty",
+        "algorithm.planner_persistent_agent_block_threshold": "persistent_agent_block_threshold",
     }
     return {
         planner_key: float(overrides[override_key])
@@ -245,6 +247,12 @@ def main():
         "episode_vertex_conflict_total",
         "episode_swap_attempt_total",
         "episode_conflict_clear_total",
+        "episode_max_consecutive_blocked",
+        "episode_max_consecutive_agent_blocked",
+        "episode_max_consecutive_no_progress",
+        "episode_persistent_block_events",
+        "episode_persistent_agent_block_events",
+        "episode_persistent_no_progress_events",
         "conflict_unresolved",
         "steps_since_task_progress",
         "path_adherence_rate",
@@ -388,6 +396,12 @@ def main():
             "episode_vertex_conflict_total",
             "episode_swap_attempt_total",
             "episode_conflict_clear_total",
+            "episode_max_consecutive_blocked",
+            "episode_max_consecutive_agent_blocked",
+            "episode_max_consecutive_no_progress",
+            "episode_persistent_block_events",
+            "episode_persistent_agent_block_events",
+            "episode_persistent_no_progress_events",
             "conflict_unresolved",
             "steps_since_task_progress",
             "path_adherence_rate",
@@ -431,6 +445,27 @@ def main():
                     row[key] = float(info[key])
                 except (TypeError, ValueError):
                     continue
+        agent_delivery_count = info.get("agent_delivery_count")
+        if agent_delivery_count is not None:
+            deliveries = [float(v) for v in agent_delivery_count]
+            if deliveries:
+                row["episode_min_agent_delivery"] = min(deliveries)
+                row["episode_delivery_imbalance"] = max(deliveries) - min(deliveries)
+                row["episode_has_starvation"] = float(min(deliveries) == 0)
+        agent_task_completed = info.get("agent_task_completed")
+        if agent_task_completed is not None:
+            tasks = [float(v) for v in agent_task_completed]
+            if tasks:
+                row["episode_min_agent_task_completed"] = min(tasks)
+                row["episode_task_imbalance"] = max(tasks) - min(tasks)
+        row["episode_has_persistent_agent_block"] = float(
+            info.get("episode_persistent_agent_block_events", 0) > 0
+            or info.get("episode_max_consecutive_agent_blocked", 0) >= 5
+        )
+        row["episode_has_persistent_no_progress"] = float(
+            info.get("episode_persistent_no_progress_events", 0) > 0
+            or info.get("episode_max_consecutive_no_progress", 0) >= 25
+        )
         if episode_gates:
             row["gate_mean"] = float(stacked_gates.mean().item())
             row["gate_var"] = float(stacked_gates.var(unbiased=False).item())

@@ -54,6 +54,8 @@ def config():
     planner_unblocked_deviation_penalty = 0.0
     planner_follow_bonus = 0.0
     planner_conflict_clear_bonus = 0.0
+    planner_persistent_agent_blocked_penalty = 0.0
+    planner_persistent_agent_block_threshold = 5
     relevance_gated_seac = False
     relevance_gate_mode = "planner_context"
     relevance_gate_hidden_dim = 64

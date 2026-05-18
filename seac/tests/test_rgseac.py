@@ -604,6 +604,12 @@ def test_planner_hints_are_appended_and_metrics_reported():
     assert "episode_moved_total" in info
     assert "episode_rotation_total" in info
     assert "episode_noop_total" in info
+    assert "episode_max_consecutive_agent_blocked" in info
+    assert "episode_max_consecutive_no_progress" in info
+    assert "episode_persistent_agent_block_events" in info
+    assert "episode_persistent_no_progress_events" in info
+    assert "agent_consecutive_agent_blocked" in info
+    assert "agent_consecutive_no_progress" in info
 
 
 def test_local_planner_feature_mode_does_not_append_absolute_positions():
@@ -697,6 +703,68 @@ def test_rotation_does_not_resolve_positional_conflict():
     assert info["step_conflict_resolved"] == 0
     assert info["conflict_unresolved"] == 1
     assert info["active_conflict_episodes"] == 1
+
+
+def test_persistent_agent_block_metrics_are_reported():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=123)
+    warehouse = env.unwrapped
+
+    warehouse.agents[0].x = 0
+    warehouse.agents[0].y = 0
+    warehouse.agents[0].dir = Direction.RIGHT
+    warehouse.agents[0].carrying_shelf = None
+    warehouse.agents[1].x = 1
+    warehouse.agents[1].y = 0
+    warehouse.agents[1].dir = Direction.UP
+    warehouse.agents[1].carrying_shelf = None
+    warehouse._recalc_grid()
+
+    info = {}
+    for _ in range(5):
+        _, _, _, _, info = env.step([Action.FORWARD.value, Action.NOOP.value])
+
+    assert info["agent_consecutive_agent_blocked"][0] == 5
+    assert info["step_persistent_agent_block_by_agent"][0] == 1
+    assert info["episode_max_consecutive_agent_blocked"] == 5
+    assert info["episode_persistent_agent_block_events"] >= 1
+    assert info["agent_consecutive_agent_blocked"][1] == 0
+
+
+def test_persistent_agent_block_penalty_escalates_shaping():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=123)
+    env = maybe_add_planner_hints(
+        env,
+        use_global_planner=True,
+        planner_type="astar",
+        planner_recompute_interval=1,
+        planner_prefix_len=2,
+        planner_feature_mode="basic",
+        agent_blocked_penalty=0.02,
+        persistent_agent_blocked_penalty=0.01,
+        persistent_agent_block_threshold=3,
+    )
+    env.reset(seed=123)
+    warehouse = env.unwrapped
+
+    warehouse.agents[0].x = 0
+    warehouse.agents[0].y = 0
+    warehouse.agents[0].dir = Direction.RIGHT
+    warehouse.agents[0].carrying_shelf = None
+    warehouse.agents[1].x = 1
+    warehouse.agents[1].y = 0
+    warehouse.agents[1].dir = Direction.UP
+    warehouse.agents[1].carrying_shelf = None
+    warehouse._recalc_grid()
+
+    info = {}
+    for _ in range(3):
+        _, _, _, _, info = env.step([Action.FORWARD.value, Action.NOOP.value])
+
+    assert info["agent_consecutive_agent_blocked"][0] == 3
+    assert info["conflict_shaping_by_agent"][0] == pytest.approx(-0.03)
+    assert info["conflict_shaping_by_agent"][1] == pytest.approx(0.0)
 
 
 def test_standalone_evaluate_env_supports_planner_wrapper():
