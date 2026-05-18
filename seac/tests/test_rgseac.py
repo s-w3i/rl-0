@@ -731,6 +731,32 @@ def test_persistent_agent_block_metrics_are_reported():
     assert info["agent_consecutive_agent_blocked"][1] == 0
 
 
+def test_delivery_resets_no_progress_counter():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=321)
+    warehouse = env.unwrapped
+    shelf = warehouse.request_queue[0]
+    goal_x, goal_y = warehouse.goals[0]
+
+    warehouse.agents[0].x = goal_x
+    warehouse.agents[0].y = goal_y
+    warehouse.agents[0].carrying_shelf = None
+    warehouse.agents[1].x = 0
+    warehouse.agents[1].y = 0
+    warehouse.agents[1].carrying_shelf = None
+    shelf.x = goal_x
+    shelf.y = goal_y
+    warehouse._consecutive_no_progress_by_agent = [24, 0]
+    warehouse._recalc_grid()
+
+    _, _, _, _, info = env.step([Action.NOOP.value, Action.NOOP.value])
+
+    assert info["agent_delivery_count"][0] == 1
+    assert info["step_progress_by_agent"][0] == 1
+    assert info["agent_consecutive_no_progress"][0] == 0
+    assert info["step_persistent_no_progress_by_agent"][0] == 0
+
+
 def test_persistent_agent_block_penalty_escalates_shaping():
     env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
     env.reset(seed=123)

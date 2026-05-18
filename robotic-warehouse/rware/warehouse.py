@@ -1511,63 +1511,6 @@ class Warehouse(gym.Env):
         step_blocked_by_agent = (
             step_blocked_static_by_agent + step_blocked_agent_by_agent
         ).astype(np.int32)
-        step_progress_by_agent = np.zeros(self.n_agents, dtype=np.int32)
-        for idx in range(self.n_agents):
-            if step_moved_by_agent[idx] > 0:
-                step_progress_by_agent[idx] = 1
-            if self._delivery_count_by_agent[idx] > delivery_count_before_step[idx]:
-                step_progress_by_agent[idx] = 1
-            if (
-                self._task_completed_by_agent[idx]
-                > task_completed_by_agent_before_step[idx]
-            ):
-                step_progress_by_agent[idx] = 1
-
-        step_persistent_block_by_agent = np.zeros(self.n_agents, dtype=np.int32)
-        step_persistent_agent_block_by_agent = np.zeros(self.n_agents, dtype=np.int32)
-        step_persistent_no_progress_by_agent = np.zeros(self.n_agents, dtype=np.int32)
-        for idx in range(self.n_agents):
-            if step_blocked_by_agent[idx] > 0:
-                self._consecutive_blocked_by_agent[idx] += 1
-            else:
-                self._consecutive_blocked_by_agent[idx] = 0
-
-            if step_blocked_agent_by_agent[idx] > 0:
-                self._consecutive_agent_blocked_by_agent[idx] += 1
-            else:
-                self._consecutive_agent_blocked_by_agent[idx] = 0
-
-            if step_progress_by_agent[idx] > 0:
-                self._consecutive_no_progress_by_agent[idx] = 0
-            else:
-                self._consecutive_no_progress_by_agent[idx] += 1
-
-            if self._consecutive_blocked_by_agent[idx] >= 5:
-                step_persistent_block_by_agent[idx] = 1
-            if self._consecutive_agent_blocked_by_agent[idx] >= 5:
-                step_persistent_agent_block_by_agent[idx] = 1
-            if self._consecutive_no_progress_by_agent[idx] >= 25:
-                step_persistent_no_progress_by_agent[idx] = 1
-
-        self._episode_max_consecutive_blocked = max(
-            self._episode_max_consecutive_blocked,
-            max(self._consecutive_blocked_by_agent, default=0),
-        )
-        self._episode_max_consecutive_agent_blocked = max(
-            self._episode_max_consecutive_agent_blocked,
-            max(self._consecutive_agent_blocked_by_agent, default=0),
-        )
-        self._episode_max_consecutive_no_progress = max(
-            self._episode_max_consecutive_no_progress,
-            max(self._consecutive_no_progress_by_agent, default=0),
-        )
-        self._episode_persistent_block_events += int(step_persistent_block_by_agent.sum())
-        self._episode_persistent_agent_block_events += int(
-            step_persistent_agent_block_by_agent.sum()
-        )
-        self._episode_persistent_no_progress_events += int(
-            step_persistent_no_progress_by_agent.sum()
-        )
 
         self._episode_moved_total += step_moved_total
         self._episode_rotation_total += int(step_rotation_total)
@@ -1693,6 +1636,64 @@ class Warehouse(gym.Env):
             self._steps_since_task_progress = 0
         else:
             self._steps_since_task_progress += 1
+
+        step_progress_by_agent = np.zeros(self.n_agents, dtype=np.int32)
+        for idx in range(self.n_agents):
+            if step_moved_by_agent[idx] > 0:
+                step_progress_by_agent[idx] = 1
+            if self._delivery_count_by_agent[idx] > delivery_count_before_step[idx]:
+                step_progress_by_agent[idx] = 1
+            if (
+                self._task_completed_by_agent[idx]
+                > task_completed_by_agent_before_step[idx]
+            ):
+                step_progress_by_agent[idx] = 1
+
+        step_persistent_block_by_agent = np.zeros(self.n_agents, dtype=np.int32)
+        step_persistent_agent_block_by_agent = np.zeros(self.n_agents, dtype=np.int32)
+        step_persistent_no_progress_by_agent = np.zeros(self.n_agents, dtype=np.int32)
+        for idx in range(self.n_agents):
+            if step_blocked_by_agent[idx] > 0:
+                self._consecutive_blocked_by_agent[idx] += 1
+            else:
+                self._consecutive_blocked_by_agent[idx] = 0
+
+            if step_blocked_agent_by_agent[idx] > 0:
+                self._consecutive_agent_blocked_by_agent[idx] += 1
+            else:
+                self._consecutive_agent_blocked_by_agent[idx] = 0
+
+            if step_progress_by_agent[idx] > 0:
+                self._consecutive_no_progress_by_agent[idx] = 0
+            else:
+                self._consecutive_no_progress_by_agent[idx] += 1
+
+            if self._consecutive_blocked_by_agent[idx] >= 5:
+                step_persistent_block_by_agent[idx] = 1
+            if self._consecutive_agent_blocked_by_agent[idx] >= 5:
+                step_persistent_agent_block_by_agent[idx] = 1
+            if self._consecutive_no_progress_by_agent[idx] >= 25:
+                step_persistent_no_progress_by_agent[idx] = 1
+
+        self._episode_max_consecutive_blocked = max(
+            self._episode_max_consecutive_blocked,
+            max(self._consecutive_blocked_by_agent, default=0),
+        )
+        self._episode_max_consecutive_agent_blocked = max(
+            self._episode_max_consecutive_agent_blocked,
+            max(self._consecutive_agent_blocked_by_agent, default=0),
+        )
+        self._episode_max_consecutive_no_progress = max(
+            self._episode_max_consecutive_no_progress,
+            max(self._consecutive_no_progress_by_agent, default=0),
+        )
+        self._episode_persistent_block_events += int(step_persistent_block_by_agent.sum())
+        self._episode_persistent_agent_block_events += int(
+            step_persistent_agent_block_by_agent.sum()
+        )
+        self._episode_persistent_no_progress_events += int(
+            step_persistent_no_progress_by_agent.sum()
+        )
 
         termination_reason = "running"
         if self.max_inactivity_steps and self._cur_inactive_steps >= self.max_inactivity_steps:

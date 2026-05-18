@@ -778,6 +778,13 @@ class Launcher(QtWidgets.QMainWindow):
         )
         layout.addRow("Log Gate Stats", self.ev_log_gate_stats)
 
+        self.ev_apply_env_reward_shaping = QtWidgets.QCheckBox()
+        self.ev_apply_env_reward_shaping.setChecked(False)
+        self.ev_apply_env_reward_shaping.setToolTip(
+            "Apply env-config training reward shaping during evaluation. Leave off for clean task-performance rewards."
+        )
+        layout.addRow("Apply Env Reward Shaping", self.ev_apply_env_reward_shaping)
+
         self.ev_record_video = QtWidgets.QCheckBox()
         self.ev_record_video.setChecked(False)
         self.ev_record_video.setToolTip(
@@ -2791,6 +2798,8 @@ class Launcher(QtWidgets.QMainWindow):
             args.append("--no-record-video")
         if env_config:
             args.extend(["--env-config", env_config])
+            if not self.ev_apply_env_reward_shaping.isChecked():
+                args.append("--no-env-reward-shaping")
         self._start_process(SEAC_DIR, args)
 
 
