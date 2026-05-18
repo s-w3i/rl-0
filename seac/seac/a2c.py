@@ -56,6 +56,17 @@ def config():
     planner_conflict_clear_bonus = 0.0
     planner_persistent_agent_blocked_penalty = 0.0
     planner_persistent_agent_block_threshold = 5
+    planner_action_follow_bonus = 0.0
+    planner_turn_to_plan_bonus = 0.0
+    planner_task_progress_bonus = 0.0
+    planner_task_regress_penalty = 0.0
+    planner_pickup_bonus = 0.0
+    planner_delivery_bonus = 0.0
+    planner_no_progress_penalty = 0.0
+    planner_no_progress_threshold = 25
+    planner_rotation_penalty = 0.0
+    planner_idle_penalty = 0.0
+    planner_toggle_penalty = 0.0
     relevance_gated_seac = False
     relevance_gate_mode = "planner_context"
     relevance_gate_hidden_dim = 64

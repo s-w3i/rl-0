@@ -1024,7 +1024,7 @@ class Launcher(QtWidgets.QMainWindow):
         self.gen_planner_unblocked_deviation_penalty.setDecimals(6)
         self.gen_planner_unblocked_deviation_penalty.setRange(0.0, 10.0)
         self.gen_planner_unblocked_deviation_penalty.setSingleStep(0.001)
-        self.gen_planner_unblocked_deviation_penalty.setValue(0.004)
+        self.gen_planner_unblocked_deviation_penalty.setValue(0.008)
         self.gen_planner_unblocked_deviation_penalty.setToolTip(
             "Training shaping: penalty for off-plan deviation when unblocked."
         )
@@ -1054,6 +1054,128 @@ class Launcher(QtWidgets.QMainWindow):
         params_form.addRow(
             "Shape Conflict Clear Bonus", self.gen_planner_conflict_clear_bonus
         )
+
+        self.gen_planner_action_follow_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_action_follow_bonus.setDecimals(6)
+        self.gen_planner_action_follow_bonus.setRange(0.0, 10.0)
+        self.gen_planner_action_follow_bonus.setSingleStep(0.001)
+        self.gen_planner_action_follow_bonus.setValue(0.02)
+        self.gen_planner_action_follow_bonus.setToolTip(
+            "Training shaping: bonus when the selected action advances to the planned next cell."
+        )
+        params_form.addRow(
+            "Shape Action Follow Bonus", self.gen_planner_action_follow_bonus
+        )
+
+        self.gen_planner_turn_to_plan_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_turn_to_plan_bonus.setDecimals(6)
+        self.gen_planner_turn_to_plan_bonus.setRange(0.0, 10.0)
+        self.gen_planner_turn_to_plan_bonus.setSingleStep(0.001)
+        self.gen_planner_turn_to_plan_bonus.setValue(0.005)
+        self.gen_planner_turn_to_plan_bonus.setToolTip(
+            "Training shaping: small bonus for turning toward the planned next cell."
+        )
+        params_form.addRow(
+            "Shape Turn To Plan Bonus", self.gen_planner_turn_to_plan_bonus
+        )
+
+        self.gen_planner_task_progress_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_task_progress_bonus.setDecimals(6)
+        self.gen_planner_task_progress_bonus.setRange(0.0, 10.0)
+        self.gen_planner_task_progress_bonus.setSingleStep(0.001)
+        self.gen_planner_task_progress_bonus.setValue(0.02)
+        self.gen_planner_task_progress_bonus.setToolTip(
+            "Training shaping: bonus for reducing distance to the current shelf/goal target."
+        )
+        params_form.addRow(
+            "Shape Task Progress Bonus", self.gen_planner_task_progress_bonus
+        )
+
+        self.gen_planner_task_regress_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_task_regress_penalty.setDecimals(6)
+        self.gen_planner_task_regress_penalty.setRange(0.0, 10.0)
+        self.gen_planner_task_regress_penalty.setSingleStep(0.001)
+        self.gen_planner_task_regress_penalty.setValue(0.005)
+        self.gen_planner_task_regress_penalty.setToolTip(
+            "Training shaping: penalty for increasing distance to the current shelf/goal target."
+        )
+        params_form.addRow(
+            "Shape Task Regress Penalty", self.gen_planner_task_regress_penalty
+        )
+
+        self.gen_planner_pickup_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_pickup_bonus.setDecimals(6)
+        self.gen_planner_pickup_bonus.setRange(0.0, 10.0)
+        self.gen_planner_pickup_bonus.setSingleStep(0.001)
+        self.gen_planner_pickup_bonus.setValue(0.15)
+        self.gen_planner_pickup_bonus.setToolTip(
+            "Training shaping: bonus for picking up the requested shelf."
+        )
+        params_form.addRow("Shape Pickup Bonus", self.gen_planner_pickup_bonus)
+
+        self.gen_planner_delivery_bonus = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_delivery_bonus.setDecimals(6)
+        self.gen_planner_delivery_bonus.setRange(0.0, 10.0)
+        self.gen_planner_delivery_bonus.setSingleStep(0.001)
+        self.gen_planner_delivery_bonus.setValue(0.25)
+        self.gen_planner_delivery_bonus.setToolTip(
+            "Training shaping: extra bonus on successful delivery."
+        )
+        params_form.addRow("Shape Delivery Bonus", self.gen_planner_delivery_bonus)
+
+        self.gen_planner_no_progress_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_no_progress_penalty.setDecimals(6)
+        self.gen_planner_no_progress_penalty.setRange(0.0, 10.0)
+        self.gen_planner_no_progress_penalty.setSingleStep(0.001)
+        self.gen_planner_no_progress_penalty.setValue(0.003)
+        self.gen_planner_no_progress_penalty.setToolTip(
+            "Training shaping: escalating penalty after repeated no-progress steps."
+        )
+        params_form.addRow(
+            "Shape No Progress Penalty", self.gen_planner_no_progress_penalty
+        )
+
+        self.gen_planner_no_progress_threshold = QtWidgets.QSpinBox()
+        self.gen_planner_no_progress_threshold.setRange(1, 1000)
+        self.gen_planner_no_progress_threshold.setValue(20)
+        self.gen_planner_no_progress_threshold.setToolTip(
+            "Consecutive no-progress steps before no-progress penalty starts."
+        )
+        params_form.addRow(
+            "Shape No Progress Threshold", self.gen_planner_no_progress_threshold
+        )
+
+        self.gen_planner_rotation_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_rotation_penalty.setDecimals(6)
+        self.gen_planner_rotation_penalty.setRange(0.0, 10.0)
+        self.gen_planner_rotation_penalty.setSingleStep(0.001)
+        self.gen_planner_rotation_penalty.setValue(0.002)
+        self.gen_planner_rotation_penalty.setToolTip(
+            "Training shaping: penalty for rotation without movement."
+        )
+        params_form.addRow(
+            "Shape Rotation Penalty", self.gen_planner_rotation_penalty
+        )
+
+        self.gen_planner_idle_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_idle_penalty.setDecimals(6)
+        self.gen_planner_idle_penalty.setRange(0.0, 10.0)
+        self.gen_planner_idle_penalty.setSingleStep(0.001)
+        self.gen_planner_idle_penalty.setValue(0.001)
+        self.gen_planner_idle_penalty.setToolTip(
+            "Training shaping: penalty for unblocked no-op without movement."
+        )
+        params_form.addRow("Shape Idle Penalty", self.gen_planner_idle_penalty)
+
+        self.gen_planner_toggle_penalty = QtWidgets.QDoubleSpinBox()
+        self.gen_planner_toggle_penalty.setDecimals(6)
+        self.gen_planner_toggle_penalty.setRange(0.0, 10.0)
+        self.gen_planner_toggle_penalty.setSingleStep(0.001)
+        self.gen_planner_toggle_penalty.setValue(0.001)
+        self.gen_planner_toggle_penalty.setToolTip(
+            "Training shaping: penalty for toggle actions that do not change load or deliver."
+        )
+        params_form.addRow("Shape Toggle Penalty", self.gen_planner_toggle_penalty)
 
         left_layout.addWidget(params_group)
 
@@ -1865,6 +1987,17 @@ class Launcher(QtWidgets.QMainWindow):
                 "algorithm.planner_conflict_clear_bonus": self.gen_planner_conflict_clear_bonus.value(),
                 "algorithm.planner_persistent_agent_blocked_penalty": self.gen_planner_persistent_agent_blocked_penalty.value(),
                 "algorithm.planner_persistent_agent_block_threshold": self.gen_planner_persistent_agent_block_threshold.value(),
+                "algorithm.planner_action_follow_bonus": self.gen_planner_action_follow_bonus.value(),
+                "algorithm.planner_turn_to_plan_bonus": self.gen_planner_turn_to_plan_bonus.value(),
+                "algorithm.planner_task_progress_bonus": self.gen_planner_task_progress_bonus.value(),
+                "algorithm.planner_task_regress_penalty": self.gen_planner_task_regress_penalty.value(),
+                "algorithm.planner_pickup_bonus": self.gen_planner_pickup_bonus.value(),
+                "algorithm.planner_delivery_bonus": self.gen_planner_delivery_bonus.value(),
+                "algorithm.planner_no_progress_penalty": self.gen_planner_no_progress_penalty.value(),
+                "algorithm.planner_no_progress_threshold": self.gen_planner_no_progress_threshold.value(),
+                "algorithm.planner_rotation_penalty": self.gen_planner_rotation_penalty.value(),
+                "algorithm.planner_idle_penalty": self.gen_planner_idle_penalty.value(),
+                "algorithm.planner_toggle_penalty": self.gen_planner_toggle_penalty.value(),
             },
         }
         return payload, ""
@@ -2488,6 +2621,49 @@ class Launcher(QtWidgets.QMainWindow):
                         self.tr_planner_conflict_clear_bonus.setValue(
                             conflict_clear_bonus
                         )
+                for override_key, widget in (
+                    (
+                        "algorithm.planner_action_follow_bonus",
+                        self.gen_planner_action_follow_bonus,
+                    ),
+                    (
+                        "algorithm.planner_turn_to_plan_bonus",
+                        self.gen_planner_turn_to_plan_bonus,
+                    ),
+                    (
+                        "algorithm.planner_task_progress_bonus",
+                        self.gen_planner_task_progress_bonus,
+                    ),
+                    (
+                        "algorithm.planner_task_regress_penalty",
+                        self.gen_planner_task_regress_penalty,
+                    ),
+                    ("algorithm.planner_pickup_bonus", self.gen_planner_pickup_bonus),
+                    (
+                        "algorithm.planner_delivery_bonus",
+                        self.gen_planner_delivery_bonus,
+                    ),
+                    (
+                        "algorithm.planner_no_progress_penalty",
+                        self.gen_planner_no_progress_penalty,
+                    ),
+                    (
+                        "algorithm.planner_rotation_penalty",
+                        self.gen_planner_rotation_penalty,
+                    ),
+                    ("algorithm.planner_idle_penalty", self.gen_planner_idle_penalty),
+                    (
+                        "algorithm.planner_toggle_penalty",
+                        self.gen_planner_toggle_penalty,
+                    ),
+                ):
+                    if override_key in training_overrides:
+                        widget.setValue(float(training_overrides[override_key]))
+                if "algorithm.planner_no_progress_threshold" in training_overrides:
+                    self._set_spin_value(
+                        self.gen_planner_no_progress_threshold,
+                        int(training_overrides["algorithm.planner_no_progress_threshold"]),
+                    )
             self._set_image_layer_checks(kwargs.get("image_observation_layers"))
 
             layout_value = kwargs.get("layout")
@@ -2525,9 +2701,20 @@ class Launcher(QtWidgets.QMainWindow):
         self.gen_planner_persistent_agent_block_threshold.setValue(5)
         self.gen_planner_swap_penalty.setValue(0.03)
         self.gen_planner_blocked_wait_bonus.setValue(0.0)
-        self.gen_planner_unblocked_deviation_penalty.setValue(0.004)
+        self.gen_planner_unblocked_deviation_penalty.setValue(0.008)
         self.gen_planner_follow_bonus.setValue(0.006)
         self.gen_planner_conflict_clear_bonus.setValue(0.008)
+        self.gen_planner_action_follow_bonus.setValue(0.02)
+        self.gen_planner_turn_to_plan_bonus.setValue(0.005)
+        self.gen_planner_task_progress_bonus.setValue(0.02)
+        self.gen_planner_task_regress_penalty.setValue(0.005)
+        self.gen_planner_pickup_bonus.setValue(0.15)
+        self.gen_planner_delivery_bonus.setValue(0.25)
+        self.gen_planner_no_progress_penalty.setValue(0.003)
+        self.gen_planner_no_progress_threshold.setValue(20)
+        self.gen_planner_rotation_penalty.setValue(0.002)
+        self.gen_planner_idle_penalty.setValue(0.001)
+        self.gen_planner_toggle_penalty.setValue(0.001)
         self._set_image_layer_checks(list(_DEFAULT_IMAGE_LAYERS))
         self.brush_select.setChecked(True)
         self.brush_lane_up.setChecked(True)

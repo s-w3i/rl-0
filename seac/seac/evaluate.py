@@ -112,6 +112,17 @@ def _planner_reward_shaping_kwargs(env_config, enabled=True):
         "algorithm.planner_conflict_clear_bonus": "conflict_clear_bonus",
         "algorithm.planner_persistent_agent_blocked_penalty": "persistent_agent_blocked_penalty",
         "algorithm.planner_persistent_agent_block_threshold": "persistent_agent_block_threshold",
+        "algorithm.planner_action_follow_bonus": "planner_action_follow_bonus",
+        "algorithm.planner_turn_to_plan_bonus": "planner_turn_to_plan_bonus",
+        "algorithm.planner_task_progress_bonus": "task_progress_bonus",
+        "algorithm.planner_task_regress_penalty": "task_regress_penalty",
+        "algorithm.planner_pickup_bonus": "pickup_bonus",
+        "algorithm.planner_delivery_bonus": "delivery_bonus",
+        "algorithm.planner_no_progress_penalty": "no_progress_penalty",
+        "algorithm.planner_no_progress_threshold": "no_progress_threshold",
+        "algorithm.planner_rotation_penalty": "rotation_penalty",
+        "algorithm.planner_idle_penalty": "idle_penalty",
+        "algorithm.planner_toggle_penalty": "toggle_penalty",
     }
     return {
         planner_key: float(overrides[override_key])
@@ -265,6 +276,9 @@ def main():
         "local_deviation_count",
         "conflict_shaping_sum",
         "conflict_shaping_mean",
+        "planner_action_shaping_sum",
+        "planner_task_shaping_sum",
+        "planner_loop_shaping_sum",
     )
 
     for ep in range(args.episodes):

@@ -410,6 +410,17 @@ class PlannerObservationWrapper(gym.Wrapper):
         conflict_clear_bonus=0.0,
         persistent_agent_blocked_penalty=0.0,
         persistent_agent_block_threshold=5,
+        planner_action_follow_bonus=0.0,
+        planner_turn_to_plan_bonus=0.0,
+        task_progress_bonus=0.0,
+        task_regress_penalty=0.0,
+        pickup_bonus=0.0,
+        delivery_bonus=0.0,
+        no_progress_penalty=0.0,
+        no_progress_threshold=25,
+        rotation_penalty=0.0,
+        idle_penalty=0.0,
+        toggle_penalty=0.0,
     ):
         _check_planner_feature_mode(planner_feature_mode)
         super().__init__(env)
@@ -433,6 +444,17 @@ class PlannerObservationWrapper(gym.Wrapper):
         self.persistent_agent_block_threshold = max(
             1, int(persistent_agent_block_threshold)
         )
+        self.planner_action_follow_bonus = float(planner_action_follow_bonus)
+        self.planner_turn_to_plan_bonus = float(planner_turn_to_plan_bonus)
+        self.task_progress_bonus = float(task_progress_bonus)
+        self.task_regress_penalty = float(task_regress_penalty)
+        self.pickup_bonus = float(pickup_bonus)
+        self.delivery_bonus = float(delivery_bonus)
+        self.no_progress_penalty = float(no_progress_penalty)
+        self.no_progress_threshold = max(1, int(no_progress_threshold))
+        self.rotation_penalty = float(rotation_penalty)
+        self.idle_penalty = float(idle_penalty)
+        self.toggle_penalty = float(toggle_penalty)
         self.observation_space = append_planner_observation_space(
             env.observation_space, planner_prefix_len, planner_feature_mode
         )
@@ -444,6 +466,7 @@ class PlannerObservationWrapper(gym.Wrapper):
 
     def step(self, action):
         step_cache = self._backend.before_step(action)
+        task_cache = self._task_cache()
         obs, reward, terminated, truncated, info = self.env.step(action)
         reward = np.asarray(reward, dtype=np.float32)
         shaped = reward.copy()
@@ -453,6 +476,9 @@ class PlannerObservationWrapper(gym.Wrapper):
         pre_blocked = step_cache["blocked"]
         action_values = step_cache["action_values"]
         shaping_by_agent = np.zeros_like(shaped, dtype=np.float32)
+        action_shaping_by_agent = np.zeros_like(shaped, dtype=np.float32)
+        task_shaping_by_agent = np.zeros_like(shaped, dtype=np.float32)
+        loop_shaping_by_agent = np.zeros_like(shaped, dtype=np.float32)
         blocked_static_by_agent = _info_array(
             info, "step_blocked_static_by_agent", len(shaped)
         )
@@ -467,6 +493,10 @@ class PlannerObservationWrapper(gym.Wrapper):
         consecutive_agent_blocked = _info_array(
             info, "agent_consecutive_agent_blocked", len(shaped)
         )
+        consecutive_no_progress = _info_array(
+            info, "agent_consecutive_no_progress", len(shaped)
+        )
+        moved_by_agent = _info_array(info, "step_moved_by_agent", len(shaped))
         has_block_breakdown = (
             blocked_static_by_agent is not None or blocked_agent_by_agent is not None
         )
@@ -514,6 +544,12 @@ class PlannerObservationWrapper(gym.Wrapper):
             ):
                 shaping_by_agent[idx] += self.conflict_clear_bonus
 
+            follows_plan_action = self._backend.action_follows_plan(
+                idx, action_values[idx], step_cache
+            )
+            turns_to_plan = self._backend.action_turns_to_plan(
+                idx, action_values[idx], step_cache
+            )
             stepped_to_plan = np.allclose(
                 np.asarray(pre_next_cells[idx], dtype=np.float32),
                 np.asarray(
@@ -523,16 +559,74 @@ class PlannerObservationWrapper(gym.Wrapper):
                 atol=1e-6,
             )
             if stepped_to_plan and self.planner_follow_bonus != 0.0:
-                shaping_by_agent[idx] += self.planner_follow_bonus
+                action_shaping_by_agent[idx] += self.planner_follow_bonus
+            if follows_plan_action and self.planner_action_follow_bonus != 0.0:
+                action_shaping_by_agent[idx] += self.planner_action_follow_bonus
+            elif turns_to_plan and self.planner_turn_to_plan_bonus != 0.0:
+                action_shaping_by_agent[idx] += self.planner_turn_to_plan_bonus
             elif (
                 pre_blocked[idx] > 0.5
                 and action_values[idx] == 0
                 and self.blocked_wait_bonus != 0.0
             ):
-                shaping_by_agent[idx] += self.blocked_wait_bonus
-            elif pre_blocked[idx] <= 0.5 and self.unblocked_deviation_penalty != 0.0:
-                shaping_by_agent[idx] -= self.unblocked_deviation_penalty
+                action_shaping_by_agent[idx] += self.blocked_wait_bonus
+            elif (
+                pre_blocked[idx] <= 0.5
+                and not follows_plan_action
+                and not turns_to_plan
+                and self.unblocked_deviation_penalty != 0.0
+            ):
+                action_shaping_by_agent[idx] -= self.unblocked_deviation_penalty
 
+            task_delta = self._task_distance_delta(task_cache[idx], idx)
+            if task_delta > 0 and self.task_progress_bonus != 0.0:
+                task_shaping_by_agent[idx] += self.task_progress_bonus * task_delta
+            elif task_delta < 0 and self.task_regress_penalty != 0.0:
+                task_shaping_by_agent[idx] -= self.task_regress_penalty * abs(task_delta)
+
+            if self._picked_up_requested_shelf(task_cache[idx], idx):
+                task_shaping_by_agent[idx] += self.pickup_bonus
+            deliveries = self._delivery_delta(task_cache[idx], idx)
+            if deliveries > 0:
+                task_shaping_by_agent[idx] += self.delivery_bonus * deliveries
+
+            no_progress_count = (
+                0
+                if consecutive_no_progress is None
+                else int(consecutive_no_progress[idx])
+            )
+            if (
+                self.no_progress_penalty != 0.0
+                and no_progress_count >= self.no_progress_threshold
+            ):
+                over_threshold = min(
+                    10, no_progress_count - self.no_progress_threshold + 1
+                )
+                loop_shaping_by_agent[idx] -= self.no_progress_penalty * over_threshold
+            if (
+                self.rotation_penalty != 0.0
+                and action_values[idx] in {2, 3}
+                and (moved_by_agent is None or moved_by_agent[idx] <= 0)
+            ):
+                loop_shaping_by_agent[idx] -= self.rotation_penalty
+            if (
+                self.idle_penalty != 0.0
+                and action_values[idx] == 0
+                and pre_blocked[idx] <= 0.5
+                and (moved_by_agent is None or moved_by_agent[idx] <= 0)
+            ):
+                loop_shaping_by_agent[idx] -= self.idle_penalty
+            if (
+                self.toggle_penalty != 0.0
+                and action_values[idx] == 4
+                and not self._toggle_changed_load(task_cache[idx], idx)
+                and deliveries <= 0
+            ):
+                loop_shaping_by_agent[idx] -= self.toggle_penalty
+
+        shaping_by_agent += (
+            action_shaping_by_agent + task_shaping_by_agent + loop_shaping_by_agent
+        )
         shaped += shaping_by_agent
         obs = self._backend.step(obs, step_cache=step_cache)
         info = self._backend.attach_info(info)
@@ -541,7 +635,100 @@ class PlannerObservationWrapper(gym.Wrapper):
         info["conflict_shaping_by_agent"] = [
             float(v) for v in np.asarray(shaping_by_agent).reshape(-1)
         ]
+        info["planner_action_shaping_sum"] = float(action_shaping_by_agent.sum())
+        info["planner_task_shaping_sum"] = float(task_shaping_by_agent.sum())
+        info["planner_loop_shaping_sum"] = float(loop_shaping_by_agent.sum())
+        info["planner_action_shaping_by_agent"] = [
+            float(v) for v in np.asarray(action_shaping_by_agent).reshape(-1)
+        ]
+        info["planner_task_shaping_by_agent"] = [
+            float(v) for v in np.asarray(task_shaping_by_agent).reshape(-1)
+        ]
+        info["planner_loop_shaping_by_agent"] = [
+            float(v) for v in np.asarray(loop_shaping_by_agent).reshape(-1)
+        ]
         return obs, shaped, terminated, truncated, info
+
+    def _task_cache(self):
+        cache = []
+        for idx, agent in enumerate(self._backend.env.agents):
+            target = self._task_target(idx)
+            distance = self._task_distance(agent, target)
+            cache.append(
+                {
+                    "target": target,
+                    "distance": distance,
+                    "carrying": agent.carrying_shelf,
+                    "delivery_count": self._delivery_count(idx),
+                }
+            )
+        return cache
+
+    def _task_target(self, agent_idx):
+        env = self._backend.env
+        agent = env.agents[agent_idx]
+        if agent.carrying_shelf is not None:
+            shelf = agent.carrying_shelf
+            if getattr(shelf, "delivered", False):
+                return (int(shelf.home_x), int(shelf.home_y))
+            if env.goals:
+                return min(
+                    (tuple(goal) for goal in env.goals),
+                    key=lambda goal: abs(goal[0] - agent.x) + abs(goal[1] - agent.y),
+                )
+            return None
+        if getattr(env, "dedicated_requests", False) and getattr(
+            env, "assigned_shelves", None
+        ):
+            shelf = env.assigned_shelves[agent_idx]
+            return (int(shelf.x), int(shelf.y))
+        candidates = list(getattr(env, "request_queue", []) or [])
+        if not candidates:
+            return None
+        shelf = min(
+            candidates,
+            key=lambda item: abs(int(item.x) - agent.x) + abs(int(item.y) - agent.y),
+        )
+        return (int(shelf.x), int(shelf.y))
+
+    def _task_distance(self, agent, target):
+        if target is None:
+            return None
+        return abs(int(target[0]) - int(agent.x)) + abs(int(target[1]) - int(agent.y))
+
+    def _task_distance_delta(self, cached, agent_idx):
+        if cached["distance"] is None:
+            return 0
+        target = cached["target"]
+        if target is None:
+            return 0
+        distance = self._task_distance(self._backend.env.agents[agent_idx], target)
+        if distance is None:
+            return 0
+        return int(cached["distance"]) - int(distance)
+
+    def _delivery_count(self, agent_idx):
+        values = getattr(self._backend.env, "_delivery_count_by_agent", None)
+        if values is None or agent_idx >= len(values):
+            return 0
+        return int(values[agent_idx])
+
+    def _delivery_delta(self, cached, agent_idx):
+        return max(0, self._delivery_count(agent_idx) - int(cached["delivery_count"]))
+
+    def _picked_up_requested_shelf(self, cached, agent_idx):
+        env = self._backend.env
+        agent = env.agents[agent_idx]
+        if cached["carrying"] is not None or agent.carrying_shelf is None:
+            return False
+        try:
+            return bool(env._is_requested_shelf(agent, agent.carrying_shelf))
+        except AttributeError:
+            return False
+
+    def _toggle_changed_load(self, cached, agent_idx):
+        agent = self._backend.env.agents[agent_idx]
+        return cached["carrying"] is not agent.carrying_shelf
 
 
 def maybe_add_planner_hints(
@@ -560,6 +747,17 @@ def maybe_add_planner_hints(
     conflict_clear_bonus=0.0,
     persistent_agent_blocked_penalty=0.0,
     persistent_agent_block_threshold=5,
+    planner_action_follow_bonus=0.0,
+    planner_turn_to_plan_bonus=0.0,
+    task_progress_bonus=0.0,
+    task_regress_penalty=0.0,
+    pickup_bonus=0.0,
+    delivery_bonus=0.0,
+    no_progress_penalty=0.0,
+    no_progress_threshold=25,
+    rotation_penalty=0.0,
+    idle_penalty=0.0,
+    toggle_penalty=0.0,
 ):
     if not use_global_planner:
         return env
@@ -578,6 +776,17 @@ def maybe_add_planner_hints(
         conflict_clear_bonus=conflict_clear_bonus,
         persistent_agent_blocked_penalty=persistent_agent_blocked_penalty,
         persistent_agent_block_threshold=persistent_agent_block_threshold,
+        planner_action_follow_bonus=planner_action_follow_bonus,
+        planner_turn_to_plan_bonus=planner_turn_to_plan_bonus,
+        task_progress_bonus=task_progress_bonus,
+        task_regress_penalty=task_regress_penalty,
+        pickup_bonus=pickup_bonus,
+        delivery_bonus=delivery_bonus,
+        no_progress_penalty=no_progress_penalty,
+        no_progress_threshold=no_progress_threshold,
+        rotation_penalty=rotation_penalty,
+        idle_penalty=idle_penalty,
+        toggle_penalty=toggle_penalty,
     )
 
 
@@ -667,6 +876,14 @@ class RwarePlannerBackend:
         raw_obs = self._last_raw_obs
         return {
             "next_cells": [self._normalized_next_cell(state) for state in self.states],
+            "current_grid_cells": [
+                (int(agent.x), int(agent.y)) for agent in self.env.agents
+            ],
+            "next_grid_cells": [
+                self._grid_next_cell(state, idx)
+                for idx, state in enumerate(self.states)
+            ],
+            "directions": [agent.dir for agent in self.env.agents],
             "has_plan": [float(len(state.path) > 1) for state in self.states],
             "blocked": [
                 self._planned_next_blocked(
@@ -794,6 +1011,62 @@ class RwarePlannerBackend:
             else:
                 values.append(int(arr.reshape(-1)[0]))
         return values
+
+    def action_follows_plan(self, agent_idx, action_value, step_cache):
+        return self._plan_action_kind(agent_idx, action_value, step_cache) == "forward"
+
+    def action_turns_to_plan(self, agent_idx, action_value, step_cache):
+        return self._plan_action_kind(agent_idx, action_value, step_cache) == "turn"
+
+    def _plan_action_kind(self, agent_idx, action_value, step_cache):
+        if action_value not in {1, 2, 3}:
+            return None
+        if step_cache["has_plan"][agent_idx] <= 0.5:
+            return None
+        current = step_cache["current_grid_cells"][agent_idx]
+        next_cell = step_cache["next_grid_cells"][agent_idx]
+        desired_dir = self._direction_between(current, next_cell)
+        if desired_dir is None:
+            return None
+        current_dir = step_cache["directions"][agent_idx]
+        if current_dir == desired_dir and action_value == 1:
+            return "forward"
+        if action_value in {2, 3}:
+            turn_dir = self._direction_after_turn(current_dir, action_value)
+            if turn_dir == desired_dir:
+                return "turn"
+        return None
+
+    def _grid_next_cell(self, state, agent_idx):
+        if len(state.path) > 1:
+            return tuple(int(v) for v in state.path[1])
+        agent = self.env.agents[agent_idx]
+        return (int(agent.x), int(agent.y))
+
+    def _direction_between(self, current, next_cell):
+        dx = int(next_cell[0]) - int(current[0])
+        dy = int(next_cell[1]) - int(current[1])
+        direction_cls = type(self.env.agents[0].dir)
+        if dx == 0 and dy == -1:
+            return direction_cls.UP
+        if dx == 0 and dy == 1:
+            return direction_cls.DOWN
+        if dx == -1 and dy == 0:
+            return direction_cls.LEFT
+        if dx == 1 and dy == 0:
+            return direction_cls.RIGHT
+        return None
+
+    def _direction_after_turn(self, direction, action_value):
+        direction_cls = type(direction)
+        wraplist = [
+            direction_cls.UP,
+            direction_cls.RIGHT,
+            direction_cls.DOWN,
+            direction_cls.LEFT,
+        ]
+        offset = 1 if action_value == 3 else -1
+        return wraplist[(wraplist.index(direction) + offset) % len(wraplist)]
 
     def _refresh_plans(self):
         for idx, agent in enumerate(self.env.agents):

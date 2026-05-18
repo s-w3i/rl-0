@@ -793,6 +793,119 @@ def test_persistent_agent_block_penalty_escalates_shaping():
     assert info["conflict_shaping_by_agent"][1] == pytest.approx(0.0)
 
 
+def test_planner_action_follow_bonus_rewards_planned_forward_action():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=123)
+    env = maybe_add_planner_hints(
+        env,
+        use_global_planner=True,
+        planner_type="astar",
+        planner_recompute_interval=1,
+        planner_prefix_len=2,
+        planner_feature_mode="basic",
+        planner_action_follow_bonus=0.02,
+    )
+    env.reset(seed=123)
+    warehouse = env.unwrapped
+    step_cache = env._backend.before_step([Action.NOOP.value, Action.NOOP.value])
+    desired_dir = env._backend._direction_between(
+        step_cache["current_grid_cells"][0],
+        step_cache["next_grid_cells"][0],
+    )
+    warehouse.agents[0].dir = desired_dir
+    warehouse._recalc_grid()
+
+    _, reward, _, _, info = env.step([Action.FORWARD.value, Action.NOOP.value])
+
+    assert reward[0] == pytest.approx(0.02)
+    assert info["planner_action_shaping_by_agent"][0] == pytest.approx(0.02)
+    assert info["planner_step_followed"] >= 1
+
+
+def test_task_progress_bonus_rewards_distance_reduction():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=123)
+    env = maybe_add_planner_hints(
+        env,
+        use_global_planner=True,
+        planner_type="astar",
+        planner_recompute_interval=1,
+        planner_prefix_len=2,
+        planner_feature_mode="basic",
+        task_progress_bonus=0.02,
+    )
+    env.reset(seed=123)
+    warehouse = env.unwrapped
+    step_cache = env._backend.before_step([Action.NOOP.value, Action.NOOP.value])
+    desired_dir = env._backend._direction_between(
+        step_cache["current_grid_cells"][0],
+        step_cache["next_grid_cells"][0],
+    )
+    warehouse.agents[0].dir = desired_dir
+    warehouse._recalc_grid()
+
+    _, reward, _, _, info = env.step([Action.FORWARD.value, Action.NOOP.value])
+
+    assert reward[0] == pytest.approx(0.02)
+    assert info["planner_task_shaping_by_agent"][0] == pytest.approx(0.02)
+    assert info["planner_task_shaping_sum"] == pytest.approx(0.02)
+
+
+def test_pickup_bonus_does_not_count_target_switch_as_regression():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=321)
+    env = maybe_add_planner_hints(
+        env,
+        use_global_planner=True,
+        planner_type="astar",
+        planner_recompute_interval=1,
+        planner_prefix_len=2,
+        planner_feature_mode="basic",
+        task_regress_penalty=0.005,
+        pickup_bonus=0.15,
+    )
+    env.reset(seed=321)
+    warehouse = env.unwrapped
+    shelf = warehouse.request_queue[0]
+    warehouse.agents[0].x = shelf.x
+    warehouse.agents[0].y = shelf.y
+    warehouse.agents[0].carrying_shelf = None
+    warehouse.agents[1].x = 0
+    warehouse.agents[1].y = 0
+    warehouse.agents[1].carrying_shelf = None
+    warehouse._recalc_grid()
+
+    _, reward, _, _, info = env.step([Action.NOOP.value, Action.NOOP.value])
+
+    assert warehouse.agents[0].carrying_shelf is shelf
+    assert reward[0] == pytest.approx(0.15)
+    assert info["planner_task_shaping_by_agent"][0] == pytest.approx(0.15)
+
+
+def test_no_progress_penalty_discourages_idle_loops():
+    env = gym.make("rware-tiny-2ag-v2", disable_env_checker=True)
+    env.reset(seed=123)
+    env = maybe_add_planner_hints(
+        env,
+        use_global_planner=True,
+        planner_type="astar",
+        planner_recompute_interval=1,
+        planner_prefix_len=2,
+        planner_feature_mode="basic",
+        no_progress_penalty=0.01,
+        no_progress_threshold=1,
+        idle_penalty=0.001,
+    )
+    env.reset(seed=123)
+
+    _, reward, _, _, info = env.step([Action.NOOP.value, Action.NOOP.value])
+
+    assert reward[0] == pytest.approx(-0.011)
+    assert reward[1] == pytest.approx(-0.011)
+    assert info["planner_loop_shaping_by_agent"] == pytest.approx([-0.011, -0.011])
+    assert info["agent_consecutive_no_progress"] == [1, 1]
+
+
 def test_standalone_evaluate_env_supports_planner_wrapper():
     env = make_eval_env("rware-small-4ag-v1", None)
     env = maybe_add_planner_hints(

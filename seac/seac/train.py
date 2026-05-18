@@ -125,6 +125,17 @@ def _planner_kwargs(algorithm):
         "persistent_agent_block_threshold": algorithm[
             "planner_persistent_agent_block_threshold"
         ],
+        "planner_action_follow_bonus": algorithm["planner_action_follow_bonus"],
+        "planner_turn_to_plan_bonus": algorithm["planner_turn_to_plan_bonus"],
+        "task_progress_bonus": algorithm["planner_task_progress_bonus"],
+        "task_regress_penalty": algorithm["planner_task_regress_penalty"],
+        "pickup_bonus": algorithm["planner_pickup_bonus"],
+        "delivery_bonus": algorithm["planner_delivery_bonus"],
+        "no_progress_penalty": algorithm["planner_no_progress_penalty"],
+        "no_progress_threshold": algorithm["planner_no_progress_threshold"],
+        "rotation_penalty": algorithm["planner_rotation_penalty"],
+        "idle_penalty": algorithm["planner_idle_penalty"],
+        "toggle_penalty": algorithm["planner_toggle_penalty"],
     }
 
 
@@ -155,6 +166,17 @@ def _apply_env_training_overrides(algorithm, env_config, _log, _run):
         "planner_conflict_clear_bonus",
         "planner_persistent_agent_blocked_penalty",
         "planner_persistent_agent_block_threshold",
+        "planner_action_follow_bonus",
+        "planner_turn_to_plan_bonus",
+        "planner_task_progress_bonus",
+        "planner_task_regress_penalty",
+        "planner_pickup_bonus",
+        "planner_delivery_bonus",
+        "planner_no_progress_penalty",
+        "planner_no_progress_threshold",
+        "planner_rotation_penalty",
+        "planner_idle_penalty",
+        "planner_toggle_penalty",
     }
     applied = {}
     for full_key, value in overrides.items():
@@ -346,6 +368,9 @@ def evaluate(
         "episode_max_consecutive_no_progress",
         "episode_persistent_agent_block_events",
         "episode_persistent_no_progress_events",
+        "planner_action_shaping_sum",
+        "planner_task_shaping_sum",
+        "planner_loop_shaping_sum",
     ):
         if key in info:
             _log.info(f"Evaluation {key}: {info[key]:.5f}")
