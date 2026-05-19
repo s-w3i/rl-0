@@ -369,6 +369,47 @@ def test_rgseac_planner_context_gate_preserves_time_env_shape():
     assert capture_gate.pair_shape == (3, 2, planner_pair_feature_dim())
 
 
+def test_learned_gate_is_not_optimized_by_transfer_loss():
+    torch.manual_seed(11)
+    action_space = gym.spaces.Discrete(3)
+    agents = [
+        _make_agent(
+            RGSEAC,
+            idx,
+            action_space,
+            relevance_gated=True,
+            gate_mode="planner_context",
+            use_global_planner=True,
+            planner_prefix_len=3,
+        )
+        for idx in range(2)
+    ]
+    for idx, agent in enumerate(agents):
+        _populate_storage(agent, seed=8100 + idx)
+
+    before = {
+        key: value.detach().clone()
+        for key, value in agents[0].model.relevance_gate.state_dict().items()
+    }
+    agents[0].update(
+        agents,
+        value_loss_coef=0.5,
+        entropy_coef=0.01,
+        seac_coef=1.0,
+        max_grad_norm=0.5,
+        device="cpu",
+        relevance_gate_mode="planner_context",
+        relevance_gate_target_mean=0.60,
+        relevance_gate_reg_coef=0.0,
+        relevance_gate_context_reg_coef=0.0,
+        relevance_gate_min_weight=0.25,
+        normalize_shared_loss=False,
+    )
+
+    for key, value in agents[0].model.relevance_gate.state_dict().items():
+        assert torch.equal(value, before[key])
+
+
 def test_rgseac_checkpoint_round_trip(tmp_path):
     agent = _make_agent(
         RGSEAC,

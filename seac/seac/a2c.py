@@ -203,6 +203,10 @@ class A2C:
         }
         torch.save(checkpoint, os.path.join(path, "models.pt"))
 
+    def set_lr(self, lr):
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+
     def restore(self, path):
         checkpoint = torch.load(os.path.join(path, "models.pt"), map_location="cpu")
         if "model_state_dict" in checkpoint:
@@ -486,7 +490,11 @@ class RGSEAC(A2C):
                     importance_sampling, relevance_gate_mode, relevance_gate_target_mean
                 )
             gate_values.append(gate)
-            weighted_importance = importance_sampling * gate
+            # The gate should decide how relevant another agent's samples are. Letting
+            # policy/value gradients flow through it gives the gate an easy shortcut:
+            # shrink transfer toward the minimum instead of learning conflict relevance.
+            transfer_gate = gate.detach()
+            weighted_importance = importance_sampling * transfer_gate
             seac_value_loss += (
                 weighted_importance * other_advantage.pow(2)
             ).mean()

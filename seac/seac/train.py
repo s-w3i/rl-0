@@ -74,6 +74,9 @@ def config():
     save_interval = int(1e6)
     eval_interval = int(1e6)
     episodes_per_eval = 8
+    save_best_checkpoint = True
+    best_checkpoint_metric = "delivery_count"
+    best_checkpoint_mode = "max"
     resume_checkpoint = None
     resume_start_update = None
 
@@ -237,6 +240,41 @@ def _optimizer_to_device(optimizer, device):
                 state[key] = value.to(device)
 
 
+def _linear_lr(base_lr, update, num_updates):
+    if num_updates <= 0:
+        return float(base_lr)
+    frac = 1.0 - (float(update - 1) / float(num_updates))
+    return float(base_lr) * max(0.0, frac)
+
+
+def _set_agent_lr(agents, lr):
+    for agent in agents:
+        agent.set_lr(lr)
+
+
+def _save_agents_checkpoint(agents, save_dir, checkpoint_name, _run=None):
+    cur_save_dir = path.join(save_dir, checkpoint_name)
+    for agent in agents:
+        save_at = path.join(cur_save_dir, f"agent{agent.agent_id}")
+        os.makedirs(save_at, exist_ok=True)
+        agent.save(save_at)
+    archive_name = shutil.make_archive(cur_save_dir, "xztar", save_dir, checkpoint_name)
+    shutil.rmtree(cur_save_dir)
+    if _run is not None:
+        _run.add_artifact(archive_name)
+    return archive_name
+
+
+def _is_better_metric(value, best_value, mode):
+    if best_value is None:
+        return True
+    if mode == "max":
+        return value > best_value
+    if mode == "min":
+        return value < best_value
+    raise ValueError(f"Unsupported best_checkpoint_mode: {mode!r}")
+
+
 def _agent_checkpoint_root(checkpoint_dir):
     checkpoint_dir = Path(checkpoint_dir)
     if (checkpoint_dir / "agent0" / "models.pt").exists():
@@ -374,6 +412,7 @@ def evaluate(
     ):
         if key in info:
             _log.info(f"Evaluation {key}: {info[key]:.5f}")
+    return info
 
 
 @ex.automain
@@ -394,10 +433,18 @@ def main(
     log_interval,
     save_interval,
     eval_interval,
+    save_best_checkpoint,
+    best_checkpoint_metric,
+    best_checkpoint_mode,
     resume_checkpoint,
     resume_start_update,
 ):
     algorithm = _apply_env_training_overrides(algorithm, env_config, _log, _run)
+    if best_checkpoint_mode not in {"max", "min"}:
+        raise ValueError(
+            "best_checkpoint_mode must be either 'max' or 'min', "
+            f"got {best_checkpoint_mode!r}."
+        )
     if algorithm["relevance_gated_seac"] and not algorithm["recurrent_policy"]:
         raise ValueError("RGSEAC requires algorithm.recurrent_policy=True.")
     if (
@@ -492,8 +539,14 @@ def main(
 
     all_infos = deque(maxlen=10)
     loss_infos = deque(maxlen=max(1, log_interval * max(1, len(agents))))
+    best_metric_value = None
 
     for j in range(start_update + 1, num_updates + 1):
+        if algorithm["use_linear_lr_decay"]:
+            current_lr = _linear_lr(algorithm["lr"], j, num_updates)
+            _set_agent_lr(agents, current_lr)
+            if writer:
+                writer.add_scalar("train/lr", current_lr, j)
 
         for step in range(algorithm["num_steps"]):
             # Sample actions
@@ -594,24 +647,42 @@ def main(
                 loss_infos.clear()
             all_infos.clear()
 
-        if save_interval is not None and (
+        if save_interval and (
             j > 0 and j % save_interval == 0 or j == num_updates
         ):
-            cur_save_dir = path.join(save_dir, f"u{j}")
-            for agent in agents:
-                save_at = path.join(cur_save_dir, f"agent{agent.agent_id}")
-                os.makedirs(save_at, exist_ok=True)
-                agent.save(save_at)
-            archive_name = shutil.make_archive(cur_save_dir, "xztar", save_dir, f"u{j}")
-            shutil.rmtree(cur_save_dir)
-            _run.add_artifact(archive_name)
+            _save_agents_checkpoint(agents, save_dir, f"u{j}", _run=_run)
 
-        if eval_interval is not None and (
+        if eval_interval and (
             j > 0 and j % eval_interval == 0 or j == num_updates
         ):
-            evaluate(
+            eval_info = evaluate(
                 agents, os.path.join(eval_dir, f"u{j}"), algorithm=algorithm
             )
+            for key, value in eval_info.items():
+                if np.asarray(value).dtype.kind in {"b", "i", "u", "f"}:
+                    _run.log_scalar(f"eval_{key}", np.asarray(value).sum(), j)
+            if save_best_checkpoint and best_checkpoint_metric in eval_info:
+                metric_value = float(np.asarray(eval_info[best_checkpoint_metric]).sum())
+                if _is_better_metric(
+                    metric_value, best_metric_value, best_checkpoint_mode
+                ):
+                    best_metric_value = metric_value
+                    archive_name = _save_agents_checkpoint(
+                        agents,
+                        save_dir,
+                        f"best_u{j}",
+                        _run=_run,
+                    )
+                    _run.info["best_checkpoint"] = archive_name
+                    _run.info["best_checkpoint_update"] = j
+                    _run.info["best_checkpoint_metric"] = best_checkpoint_metric
+                    _run.info["best_checkpoint_value"] = metric_value
+                    _log.info(
+                        "Saved new best checkpoint %s=%.5f at update %s",
+                        best_checkpoint_metric,
+                        metric_value,
+                        j,
+                    )
             videos = glob.glob(os.path.join(eval_dir, f"u{j}") + "/*.mp4")
             for i, v in enumerate(videos):
                 _run.add_artifact(v, f"u{j}.{i}.mp4")
