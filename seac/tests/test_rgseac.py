@@ -24,6 +24,7 @@ from planner import (  # noqa: E402
     planner_pair_feature_dim,
 )
 from rware.warehouse import Action, Direction  # noqa: E402
+from train import _eval_stability_score, _squash_info  # noqa: E402
 
 
 def _make_agent(
@@ -408,6 +409,57 @@ def test_learned_gate_is_not_optimized_by_transfer_loss():
 
     for key, value in agents[0].model.relevance_gate.state_dict().items():
         assert torch.equal(value, before[key])
+
+
+def test_stability_score_penalizes_starvation_and_stuck_rotation():
+    healthy = {
+        "delivery_count": 27.0,
+        "task_completed": 26.0,
+        "episode_has_starvation": 0.0,
+        "conflict_unresolved": 0.0,
+        "episode_persistent_no_progress_events": 20.0,
+        "episode_persistent_agent_block_events": 2.0,
+        "episode_max_consecutive_no_progress": 20.0,
+        "episode_blocked_agent_total": 20.0,
+        "blocked_rotate_rate": 0.02,
+    }
+    stuck = {
+        **healthy,
+        "delivery_count": 10.0,
+        "task_completed": 10.0,
+        "episode_has_starvation": 1.0,
+        "conflict_unresolved": 2.0,
+        "episode_persistent_no_progress_events": 1067.0,
+        "episode_persistent_agent_block_events": 7.0,
+        "episode_max_consecutive_no_progress": 485.0,
+        "episode_blocked_agent_total": 59.0,
+        "blocked_rotate_rate": 0.585,
+    }
+
+    assert _eval_stability_score(healthy) > _eval_stability_score(stuck)
+
+
+def test_training_eval_squash_derives_starvation_metrics():
+    squashed = _squash_info(
+        [
+            {
+                "delivery_count": 10,
+                "task_completed": 10,
+                "agent_delivery_count": [10, 0, 0],
+                "agent_task_completed": [10, 0, 0],
+            },
+            {
+                "delivery_count": 27,
+                "task_completed": 26,
+                "agent_delivery_count": [9, 8, 10],
+                "agent_task_completed": [9, 8, 9],
+            },
+        ]
+    )
+
+    assert squashed["episode_has_starvation"] == pytest.approx(0.5)
+    assert squashed["episode_min_agent_delivery"] == pytest.approx(4.0)
+    assert squashed["episode_delivery_imbalance"] == pytest.approx(6.0)
 
 
 def test_rgseac_checkpoint_round_trip(tmp_path):

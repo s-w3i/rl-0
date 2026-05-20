@@ -75,7 +75,7 @@ def config():
     eval_interval = int(1e6)
     episodes_per_eval = 8
     save_best_checkpoint = True
-    best_checkpoint_metric = "delivery_count"
+    best_checkpoint_metric = "stability_score"
     best_checkpoint_mode = "max"
     resume_checkpoint = None
     resume_start_update = None
@@ -85,8 +85,27 @@ for conf in glob.glob("configs/*.yaml"):
     name = f"{Path(conf).stem}"
     ex.add_named_config(name, conf)
 
+
+def _with_episode_derived_metrics(info):
+    info = dict(info)
+    agent_delivery_count = info.get("agent_delivery_count")
+    if agent_delivery_count is not None:
+        deliveries = np.asarray(agent_delivery_count, dtype=np.float32).reshape(-1)
+        if deliveries.size:
+            info["episode_min_agent_delivery"] = float(deliveries.min())
+            info["episode_delivery_imbalance"] = float(deliveries.max() - deliveries.min())
+            info["episode_has_starvation"] = float(deliveries.min() == 0)
+    agent_task_completed = info.get("agent_task_completed")
+    if agent_task_completed is not None:
+        tasks = np.asarray(agent_task_completed, dtype=np.float32).reshape(-1)
+        if tasks.size:
+            info["episode_min_agent_task_completed"] = float(tasks.min())
+            info["episode_task_imbalance"] = float(tasks.max() - tasks.min())
+    return info
+
+
 def _squash_info(info):
-    info = [i for i in info if i]
+    info = [_with_episode_derived_metrics(i) for i in info if i]
     new_info = {}
     keys = set([k for i in info for k in i.keys()])
     keys.discard("TimeLimit.truncated")
@@ -273,6 +292,39 @@ def _is_better_metric(value, best_value, mode):
     if mode == "min":
         return value < best_value
     raise ValueError(f"Unsupported best_checkpoint_mode: {mode!r}")
+
+
+def _info_value(info, key, default=0.0):
+    value = info.get(key, default)
+    arr = np.asarray(value)
+    if arr.dtype.kind not in {"b", "i", "u", "f"}:
+        return float(default)
+    return float(arr.sum())
+
+
+def _eval_stability_score(info):
+    """Prefer checkpoints that deliver reliably without deadlock or starvation."""
+    delivery = _info_value(info, "delivery_count")
+    task_completed = _info_value(info, "task_completed")
+    starvation = _info_value(info, "episode_has_starvation")
+    unresolved = _info_value(info, "conflict_unresolved")
+    persistent_no_progress = _info_value(info, "episode_persistent_no_progress_events")
+    persistent_agent_block = _info_value(info, "episode_persistent_agent_block_events")
+    max_no_progress = _info_value(info, "episode_max_consecutive_no_progress")
+    blocked_agent = _info_value(info, "episode_blocked_agent_total")
+    blocked_rotate_rate = _info_value(info, "blocked_rotate_rate")
+
+    return (
+        delivery
+        + 0.5 * task_completed
+        - 8.0 * starvation
+        - 2.0 * unresolved
+        - 0.02 * persistent_no_progress
+        - 0.05 * persistent_agent_block
+        - 0.02 * max_no_progress
+        - 0.01 * blocked_agent
+        - 4.0 * blocked_rotate_rate
+    )
 
 
 def _agent_checkpoint_root(checkpoint_dir):
@@ -658,6 +710,7 @@ def main(
             eval_info = evaluate(
                 agents, os.path.join(eval_dir, f"u{j}"), algorithm=algorithm
             )
+            eval_info["stability_score"] = _eval_stability_score(eval_info)
             for key, value in eval_info.items():
                 if np.asarray(value).dtype.kind in {"b", "i", "u", "f"}:
                     _run.log_scalar(f"eval_{key}", np.asarray(value).sum(), j)
